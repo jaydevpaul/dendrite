@@ -429,6 +429,78 @@ No composite or partial indexes yet — those are added only after a measured sl
 query, not speculatively.
 
 ---
+# Dendrite — Entity-Relationship Diagram
+
+Companion to section 9 of the decision record. This is the at-a-glance view;
+section 9's tables remain authoritative (the diagram cannot show CHECK
+constraints — the five on Edge and the strategy-value checks).
+
+```mermaid
+erDiagram
+  USER ||--o{ CONVERSATION : owns
+  CONVERSATION ||--o{ MESSAGE : contains
+  MESSAGE ||--o{ EDGE : "parent of"
+  MESSAGE ||--o| EDGE : "child of"
+  MESSAGE ||--o{ GENERATION : "prompted (if user)"
+  MESSAGE ||--o| GENERATION : "produced (if assistant)"
+  MESSAGE ||--o{ MESSAGE_SUMMARY : has
+  MESSAGE ||--o{ MESSAGE_EMBEDDING : has
+  USER {
+    uuid id PK
+  }
+  CONVERSATION {
+    uuid id PK
+    uuid user_id FK
+    text title
+    text default_strategy
+    uuid root_message_id FK
+    timestamptz created_at
+    timestamptz updated_at
+  }
+  MESSAGE {
+    uuid id PK
+    uuid conversation_id FK
+    text role "user or assistant"
+    text content
+    timestamptz created_at
+    timestamptz updated_at
+  }
+  EDGE {
+    uuid id PK
+    uuid parent_message_id FK
+    uuid child_message_id FK "UNIQUE (one parent max)"
+    integer anchor_start "null if continuation"
+    integer anchor_end "null if continuation"
+    text anchored_text "null if continuation"
+    text strategy_override "null means use default"
+    timestamptz created_at
+  }
+  GENERATION {
+    uuid id PK
+    uuid user_message_id FK
+    uuid assistant_message_id FK "UNIQUE (one gen per assistant msg)"
+    text strategy_used
+    text model_used
+    text composed_context
+    integer input_tokens "nullable"
+    integer output_tokens "nullable"
+    timestamptz created_at
+  }
+  MESSAGE_SUMMARY {
+    uuid id PK
+    uuid message_id FK
+    text summary_text
+    text model_used
+    timestamptz created_at
+  }
+  MESSAGE_EMBEDDING {
+    uuid id PK
+    uuid message_id FK
+    vector embedding "1536 dims"
+    text model_used
+    timestamptz created_at
+  }
+```
 
 ## 10. Validation Scenarios
 
