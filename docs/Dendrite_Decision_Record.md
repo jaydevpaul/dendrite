@@ -315,6 +315,33 @@ end-to-end. Failure modes get deliberate fallbacks, never silent failure:
   correct).
 - Chain unusually deep → cap the walk, accept truncation.
 
+### 8.7 Implementation decisions (Phase 2 build session, 2026-07)
+
+These were decided during the first implementation session, when section 9 was
+silent on them. Recorded here to keep the spec and the code in sync.
+
+**Async SQLAlchemy.** The data layer uses `asyncpg` + SQLAlchemy 2.0 async ORM
+(`create_async_engine`, `async_sessionmaker`, `expire_on_commit=False`), not sync
+`psycopg` + classic sessions. Rationale: the stack is already async-first
+(FastAPI, arq per section 8.5) and the workload is I/O-bound and latency-sensitive
+(section 8.6) — matching the stack avoids a sync/async impedance mismatch.
+Declarative models remain compatible with sync sessions if ever needed.
+
+**User stub table.** A minimal `User` table (`id` uuid PK only, no other columns)
+was added so `Conversation.user_id`'s foreign key has a real target and
+referential integrity holds from day one. This is an *implementation stub, not
+the final auth design* — the full auth model (columns, provider choice) remains
+deferred to the Weeks 3–6 backend block (section 12). The stub is extended, not
+replaced, when auth lands.
+
+**`text` enforced at the Base.** The "text everywhere" rule (section 9) is
+enforced globally via `type_annotation_map = {str: Text}` on the declarative
+`Base`, rather than by writing `Text` on each column. This makes every bare `str`
+column render as Postgres `TEXT` automatically and prevents silent drift back to
+`VARCHAR` on future models. (Caught during review: without the map, SQLAlchemy
+infers `VARCHAR` for `Mapped[str]`, which contradicted section 9.)
+
+
 ---
 
 ## 9. Database Schema (field-level, locked)

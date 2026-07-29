@@ -1,0 +1,2 @@
+1. Why u used PostgreSQL and not any other db?
+2. How is PostgreSQL different and better from MySQL?
