@@ -16,9 +16,14 @@ repo. Typing the code is part of that. Stated 2026-08-02.
 in build order, and explain what it does and why. Wait for the user to type
 it before moving on.
 
-Scope of the rule (refined 2026-08-21): it covers **application code under
-`app/`**. Test files are exempt — the user asked me to create those
-directly rather than type them. Docs the user asks to be saved (design
-docs, decision record, progress log) are written directly too.
+Scope of the rule (refined 2026-08-21, again 2026-08-30): it covers
+**backend Python under `app/` only**. Everything else is written directly:
+- **Frontend code is fully exempt** — the user said explicitly "I want
+  Claude to handle the complete frontend, I don't want to type" (2026-08-30).
+  Write `frontend/` files with tools, do not paste them in chat.
+- Test files are exempt.
+- Docs the user asks to be saved (design docs, decision record, progress
+  log) are written directly too.
+
 Verification commands are fine to run once the code is in place.
 See [[dendrite-learning-project]].
