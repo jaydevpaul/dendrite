@@ -342,6 +342,48 @@ column render as Postgres `TEXT` automatically and prevents silent drift back to
 infers `VARCHAR` for `Mapped[str]`, which contradicted section 9.)
 
 
+### 8.8 Backend block decisions (Weeks 3–6, decided 2026-07-29)
+
+The three Weeks 3–6 open items from section 12, taken together because they
+interact. All three are now **decided**; section 12 lists them as resolved.
+
+**Auth — roll-your-own minimal.** Session-based auth written in-repo: the `User`
+stub (section 8.7) gains `email` + `password_hash` (argon2 via `passlib`), a
+signup/login pair of routes, and a `get_current_user()` FastAPI dependency that
+resolves the session cookie into a `User` and makes `Conversation.user_id` real.
+Rejected Supabase/Clerk/Auth0: hosted auth keeps its user records in the
+provider's store, which would mean a second database alongside `dendrite-pg` and
+a mirror-row sync path to keep the `user_id` FK valid — real complexity bought
+for a column this project barely reads. The usual "never roll your own auth"
+advice targets production systems holding real users' credentials; this is a
+solo project with no real users, where the learning value is the point and the
+exposure is nil. Revisit if Dendrite ever takes outside users.
+
+**LLM provider — thin abstraction from day one.** One `LLMClient` protocol
+(`generate` + `embed`) with a single concrete implementation behind it; call
+sites depend on the protocol, never on a vendor SDK. Three subsystems call a
+model — generation, embeddings (section 9 `MessageEmbedding`), and async
+summarization (section 8.5) — and section 7 makes comparative evaluation part of
+the MVP, so varying model or vendor mid-experiment is expected, not
+hypothetical. Refactoring call sites during an eval run is how measurements get
+silently corrupted. The abstraction also makes a `FakeLLMClient` possible, which
+is what allows context composition to be tested without network calls or spend.
+Explicitly *not* a provider registry with config-driven routing — that is the
+speculative-infrastructure anti-pattern in section 13.
+
+**Deployment — SSE now, long-lived container when deployed.** Streaming uses
+Server-Sent Events (`StreamingResponse`), not websockets: generation is
+server→client only, so the websocket's duplex channel buys nothing against its
+connection-lifecycle cost. Websockets get reconsidered only if real-time collab
+lands (out of MVP per section 4). Hosting targets a long-lived container
+(Fly.io/Render class), not serverless: cold starts alone can consume the entire
+1–2s context-composition budget (section 8.6) before any logic runs, serverless
+request-duration caps fight a 30s+ open stream, and a connection pool is
+worthless in a process that dies between requests. Hosting stays local
+(Docker) through the eval phase — the transport half of this decision is what
+touches code, and it is settled now.
+
+
 ---
 
 ## 9. Database Schema (field-level, locked)
@@ -603,12 +645,19 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*
 - **Full failure-mode list** for each context-composition step + its fallback —
   *trigger: near the strategy-interface implementation, Weeks 7–14.*
-- **Auth approach** (roll-your-own vs Clerk/Supabase/Auth0) — affects `user_id`.
-  *Milestone: backend block, Weeks 3–6.*
-- **LLM provider abstraction** (single vs abstracted from day one) —
-  *Milestone: backend block, Weeks 3–6.*
-- **Deployment target** (affects streaming: SSE vs websocket, cold-start
-  tolerance) — *Milestone: backend block, Weeks 3–6.*
+- **`User.display_name`** (nullable text) — deliberately NOT added with auth:
+  nothing renders a user name yet, and a nullable column is equally cheap to
+  add later. `username` was considered and rejected outright — a public handle
+  buys nothing without a social surface, and costs a second unique constraint,
+  case-folding rules, reserved-name blocking, and ambiguity in the login
+  lookup. *Trigger: when the frontend needs to display a user's name.*
+- ~~**Auth approach** (roll-your-own vs Clerk/Supabase/Auth0) — affects
+  `user_id`.~~ **RESOLVED 2026-07-29** → roll-your-own minimal, section 8.8.
+- ~~**LLM provider abstraction** (single vs abstracted from day one)~~
+  **RESOLVED 2026-07-29** → thin abstraction from day one, section 8.8.
+- ~~**Deployment target** (affects streaming: SSE vs websocket, cold-start
+  tolerance)~~ **RESOLVED 2026-07-29** → SSE + long-lived container,
+  section 8.8.
 
 Condition-based deferral ("solve when X becomes true") is deliberate here — it's
 more honest than forcing a calendar date onto a question you don't yet know

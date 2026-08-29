@@ -1,0 +1,24 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    container_name: dendrite-pg
+    environment:
+      POSTGRES_USER: dendrite
+      POSTGRES_PASSWORD: dendrite
+      POSTGRES_DB: dendrite
+    ports:
+      # Host 5433 -> container 5432. The native Windows Postgres owns 5432
+      # and reinstates itself on update; 5433 keeps us clear of it for good.
+      - "5433:5432"
+    volumes:
+      - dendrite_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dendrite -d dendrite"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  dendrite_pgdata:
+    external: true

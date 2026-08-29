@@ -12,6 +12,16 @@ dependencies = [
     "alembic>=1.13",
     "pydantic-settings>=2.4",
     "uuid6>=2024.7.10",
+    "passlib[argon2]>=1.7.4",
+    "pyjwt>=2.9",
+    "email-validator>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -20,3 +30,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"

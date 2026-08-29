@@ -10,15 +10,19 @@ from app.models._shared import UUIDType
 
 
 class User(Base):
-    """Minimal stub, not one of the six entities in the decision record.
+    """The account a Conversation belongs to.
 
-    Exists only so Conversation.user_id has a real FK target ahead of the
-    auth design (decision record section 12). Expand or replace when auth lands.
+    Not one of the six entities in the decision record - it exists so
+    Conversation.user_id has a real FK target. Extended from the original
+    id-only stub with credentials per docs/auth_design.md section 5
+    (decision record section 8.8).
     """
 
     __tablename__ = "user"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=uuid7)
+    email: Mapped[str] =  mapped_column(nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

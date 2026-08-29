@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import health
+from app.api.routes import auth,health
 from app.core.db import engine
 
 
@@ -16,3 +16,4 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Dendrite", lifespan=lifespan)
 
 app.include_router(health.router)
+app.include_router(auth.router)

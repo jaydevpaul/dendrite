@@ -134,3 +134,71 @@ decision made. This is what a future session reads to pick up cleanly.
   - Next: the auth-approach decision (roll-your-own vs Clerk/Supabase/Auth0),
     ideally taken together with the other two Weeks 3–6 open items — LLM
     provider abstraction and deployment target — then real routes.
+
+- **2026-08-30**: Auth built end-to-end — the API's first real feature.
+  Started by closing the three Weeks 3–6 open items (section 12), since the
+  log's standing "auth next" was blocked on an undecided approach. All three
+  now recorded as **section 8.8** of the decision record, and struck through
+  in section 12:
+  - **Auth: roll-your-own minimal.** Hosted auth (Supabase/Clerk/Auth0) keeps
+    its user records in the provider's store, which would mean a second
+    database alongside `dendrite-pg` plus a mirror-row sync path to keep the
+    `user_id` FK valid — real complexity for a column this project barely
+    reads.
+  - **LLM provider: thin abstraction from day one** (protocol + one concrete
+    impl). Not built yet — decision only.
+  - **Deployment: SSE, not websockets** (generation is server→client only);
+    long-lived container rather than serverless (cold starts alone can eat the
+    1–2s composition budget of section 8.6). Hosting stays local through eval.
+  - Full design written to `docs/auth_design.md` — threat model, why argon2
+    over SHA-256, stateless-vs-stateful sessions, cookie flag rationale, the
+    four flows, and the settled parameters (7-day TTL, signup auto-logs-in,
+    `GET /auth/me`, min password length 8 and no composition rules).
+  - Also deferred, with reasoning, in section 12: `User.display_name`
+    (trigger: when the frontend renders a name). `username` rejected outright
+    — a public handle buys nothing without a social surface and costs a second
+    unique constraint, case-folding, reserved names, and login ambiguity.
+  - **Built:** `app/core/security.py` (argon2 via `passlib` CryptContext,
+    HS256 JWTs via `pyjwt`, module-level `DUMMY_HASH`); `app/schemas/auth.py`;
+    `app/services/auth.py`; `app/api/deps.py` (`get_current_user` +
+    `CurrentUser` alias); `app/api/routes/auth.py` (`/auth/signup`, `/login`,
+    `/logout`, `/me`), mounted in `main.py`. `config.py` gained
+    `secret_key` / `access_token_ttl` / `cookie_*`; an unset key generates an
+    ephemeral one with a warning rather than shipping a real default.
+  - **Schema:** `User` extended with `email` (NOT NULL, UNIQUE) +
+    `password_hash` (NOT NULL), both `TEXT` via the `Base` type map. Migration
+    `7fed33945b5c` applied. Autogenerate emitted `create_unique_constraint(None, ...)`
+    — fine on upgrade, but `drop_constraint(None, ...)` makes `downgrade()`
+    unrunnable, so the constraint was named `uq_user_email` by hand. (Third
+    time autogenerate output has needed correcting; keep reviewing it.)
+  - **Tests:** new `tests/` at repo root — `conftest.py` creates a separate
+    `dendrite_test` database (AUTOCOMMIT for `CREATE DATABASE`), builds schema
+    via `Base.metadata.create_all`, truncates between tests, and exposes an
+    `httpx` client fixture using `app.dependency_overrides` to swap
+    `get_session`. **45 tests** across pure crypto, service, and route layers.
+    Note `create_all` handles the `use_alter` circular FK automatically — the
+    exact thing Alembic does not, per the 2026-07-23 entry. Dev deps added:
+    `pytest`, `pytest-asyncio`, `httpx`.
+  - **⚠ Local DB now runs on port 5433 via `docker-compose.yml`.** The native
+    Windows Postgres service (`postgresql-x64-18`) had reinstated itself —
+    an EDB installer update reset it to Automatic and it took IPv4 `:5432`,
+    leaving Docker bound only to IPv6. Because that native server *also* has a
+    `dendrite` role and database, connections succeeded silently into an empty
+    schema; Alembic's "Target database is not up to date" was the only thing
+    that caught it. Fixed durably by moving the container's host port to 5433
+    rather than fighting for 5432 again. Also converted the hand-run
+    `docker run` container into Compose (same `dendrite_pgdata` volume, marked
+    `external: true`).
+    **Future sessions: `docker compose up -d` (not `docker start`), and make
+    sure Docker Desktop itself is running.**
+  - A `.env` now exists locally (gitignored) holding `DENDRITE_SECRET_KEY` and
+    the 5433 URL; `.env.example` updated to match. Note `.env` overrides the
+    code default — a stale port there silently re-broke the DB connection
+    after it had been fixed in `config.py`.
+  - Working-style note: the user now types all `app/` code by hand for
+    learning; present code in chat rather than editing those files. Test files
+    and docs are fine to write directly.
+  - Next: **none of this is committed yet** — a four-commit plan (docs /
+    infra / feature+tests / session memory) was given but not executed. After
+    that: conversation + message routes, where `CurrentUser` starts scoping
+    every query and the section 8.4 ancestor-walk gets built.
