@@ -68,12 +68,32 @@ dendrite/
 > the API. If the UI ends up on a different origin this changes materially —
 > CORS with credentials, `SameSite=None; Secure`, and then explicit CSRF tokens.
 
-That moment is now. Vite dev serves on `:5173`, FastAPI on `:8000` — different
-origins. The browser would refuse to send the session cookie, and login would
-appear to succeed while every subsequent request came back 401.
+That moment is partly now — with an important precision, because CORS and
+SameSite are routinely conflated and they fail differently.
 
-**The fix is Vite's dev proxy, not CORS.** Proxy `/api` through the Vite dev
-server to `http://localhost:8000`, so the browser only ever sees one origin:
+**SameSite is NOT the problem here.** `SameSite` is evaluated on *site*, and
+**port is not part of a site**. `http://localhost:5173` and
+`http://localhost:8000` are same-site (same scheme, same host) but
+different-origin. `SameSite=Lax` is satisfied between them.
+
+**CORS is the problem**, because CORS keys on scheme + host + port. With no
+CORS configuration the failure is loud: a JSON POST triggers a preflight, the
+backend has no handler, and the browser blocks the request before any JS sees
+it — a console CORS error, not a 401.
+
+The dangerous case is CORS *half*-configured, which is what happens when
+someone hits that error and reaches for the obvious fix:
+
+- `CORSMiddleware` added but `allow_credentials` left at its `False` default —
+  the POST succeeds, the backend returns 200 with `Set-Cookie`, and the browser
+  hands over the body while **discarding the cookie**. The app concludes login
+  worked and 401s on every request after.
+- Or CORS correct, but the client `fetch` omits `credentials: "include"` —
+  identical symptom.
+
+**The fix is Vite's dev proxy, which sidesteps CORS entirely.** Proxy `/api`
+through the Vite dev server to `http://localhost:8000`, so the browser only
+ever sees one origin:
 
 ```ts
 // vite.config.ts
@@ -85,15 +105,46 @@ server: {
 Then all frontend requests use relative paths (`/api/auth/login`) and the
 cookie just works, unchanged.
 
-**Do not** add `CORSMiddleware` with `allow_credentials=True`, and **do not**
-switch the cookie to `SameSite=None`. Both weaken the CSRF posture that
-`auth_design.md` deliberately chose, to solve a problem the proxy solves for
-free. In production the API and the built frontend are served from one origin,
-so the proxy is a dev-only concern that disappears.
+**Do not** reach for `CORSMiddleware` as the fix, and **do not** switch the
+cookie to `SameSite=None`. The second is pure downside — it weakens the CSRF
+posture `auth_design.md` deliberately chose while fixing nothing, since
+SameSite was never blocking anything here. The proxy solves the real (CORS)
+problem for free, and mirrors production, where the API and the built frontend
+are served from one origin — so the proxy is a dev-only concern that
+disappears.
 
 *(Note: backend routes are currently mounted at `/auth/*`, not `/api/auth/*`.
 Either prefix the API router or point the proxy at `/auth` — decide when
 wiring the first slice.)*
+
+### Production topology — deliberately undecided
+
+Section 8.8 of the decision record settles *how* Dendrite is hosted (a
+long-lived container, SSE for streaming). It does not settle whether the
+frontend and API share an origin. That sub-question is open, and it is the one
+that decides whether CORS is ever needed:
+
+| Production shape | Same-site? | Requires |
+|---|---|---|
+| Container serves the built SPA (one origin) | yes | nothing |
+| `app.example.com` + `api.example.com` | yes — subdomains share a registrable domain | CORS with explicit origins; `SameSite=Lax` still works |
+| Frontend on Vercel, API on Fly.io | **no** — different registrable domains | CORS **plus** `SameSite=None; Secure` **plus** hand-rolled CSRF tokens |
+
+The third row is the expensive one: a `SameSite=None` cookie forfeits the
+browser's built-in CSRF defence, which `auth_design.md` deliberately relied on,
+and the replacement has to be built by hand.
+
+**Decision: use the dev proxy for now**, which keeps every option open and
+matches the cheapest production shape. *Trigger: revisit when a deployment
+target is actually chosen — before the first deploy, not before that.*
+
+An explicit-origin CORS setup (`allow_origins=["http://localhost:5173"]`,
+`allow_credentials=True`, and `credentials: "include"` on every client call) is
+a perfectly valid alternative and would work today. It is not chosen because it
+adds environment-specific config to keep in sync for a benefit that only
+materializes if the split-host shape is picked. Note `allow_origins=["*"]` is
+silently incompatible with credentials — the browser rejects that combination,
+so origins must always be enumerated.
 
 ---
 
