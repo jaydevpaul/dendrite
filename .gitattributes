@@ -1,0 +1,17 @@
+# Line endings are a repo fact, not a per-machine one.
+#
+# Without this, the result depends on each clone's core.autocrlf, which is how
+# you end up with phantom diffs touching every line of a file nobody edited.
+# text=auto lets git decide what is text; eol=lf pins the working-tree ending
+# so every checkout matches what is stored.
+* text=auto eol=lf
+
+# Binary assets: never convert, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
