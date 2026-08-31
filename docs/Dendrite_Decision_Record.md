@@ -2,7 +2,7 @@
 type: project-decision-record
 project: Dendrite
 status: Phase 2 — data layer fully locked; ready for implementation
-updated: 2026-07-05
+updated: 2026-08-30
 ---
 
 # Dendrite — Complete Decision Record
@@ -90,11 +90,15 @@ on being *more principled*, not more featured.
    per-eval-run.
 5. **Evaluation framework** (see section 7).
 6. **Persistence + multi-user auth**. Real DB, users, sessions.
-7. **Minimal coherent UI**. Sidebar tree navigation.
+7. ~~**Minimal coherent UI**. Sidebar tree navigation.~~ **Widened — see
+   section 8.10 (2026-08-30).** The UI is now a first-class deliverable built
+   in parallel with the backend, including a public landing page and a brand
+   system.
 
 ### Not in MVP (closed, not open for casual reopening)
 
-Canvas/graph visualization (→ MVP+1, first post-MVP task) · real-time collab
+~~Canvas/graph visualization (→ MVP+1, first post-MVP task)~~ **moved into MVP,
+see section 8.9** · real-time collab
 (v2/v3, budget 8–12 wks) · sibling-branch bridging (v2, manual only) ·
 multi-model branching · tools/MCP · mobile UI · user-facing "compress chain into
 node" · fork-entire-conversation (post-MVP; note that branching already covers
@@ -103,10 +107,12 @@ feature).
 
 ### The canvas decision
 
-Deferred to MVP+1 (Path C). Rationale: canvas is the most aesthetic but least
-novel part; trading it against retrieval drill-down would weaken the thesis.
-Recruiters look at current repo state, not history — no penalty for it landing a
-week after MVP.
+**Superseded by section 8.9 (2026-08-30).** Retained for the record:
+
+> Deferred to MVP+1 (Path C). Rationale: canvas is the most aesthetic but least
+> novel part; trading it against retrieval drill-down would weaken the thesis.
+> Recruiters look at current repo state, not history — no penalty for it landing
+> a week after MVP.
 
 ---
 
@@ -382,6 +388,108 @@ request-duration caps fight a 30s+ open stream, and a connection pool is
 worthless in a process that dies between requests. Hosting stays local
 (Docker) through the eval phase — the transport half of this decision is what
 touches code, and it is settled now.
+
+
+### 8.9 Graph view moved into MVP (supersedes section 4, decided 2026-08-30)
+
+Section 4 closed canvas/graph visualization to MVP+1. That deferral is
+**reversed**; the graph ships inside MVP alongside the sidebar tree. Recorded
+here rather than edited away, per the repo rule that locked decisions are
+superseded in writing and never pivoted silently.
+
+**What changed the calculus.** The original rationale was cost against the
+thesis — canvas is the most aesthetic and least novel component, so time spent
+on it is time not spent on retrieval drill-down. Two facts revise the cost
+estimate, both of which follow from decisions already locked elsewhere:
+
+1. **It is a tree, not a general graph.** Section 4 locks *one parent per node*.
+   A DAG in which every node has exactly one parent is a tree, so layout is
+   deterministic — depth sets the row, sibling order sets the lane. No
+   force-directed simulation, no graph engine, no physics tuning. This is the
+   single biggest cost reduction, and it was always true; it simply was not
+   noticed when the deferral was written.
+2. **It is entirely frontend.** No new endpoint, no schema change, no
+   backend work. It consumes the same ancestor-walk (section 8.4) the tree
+   already needs.
+
+**Explicitly rejected: a graph library.** React Flow, D3-force and Cytoscape
+solve layout for graphs whose structure is unknown. Ours is known. Worse, a
+force-directed layout settles differently on each load, so two screenshots of
+the same conversation would not match — actively harmful for a project whose
+deliverable is published evaluation (section 7). Hand-rolled SVG over a
+deterministic layered layout, no dependency.
+
+**Both views ship; neither replaces the other.** The sidebar tree remains the
+persistent navigator — it is better for reading a single root-to-leaf path, for
+keyboard navigation, and at narrow widths. The graph is a second view over the
+same selection state, so switching preserves the selected node and refetches
+nothing.
+
+**Rendering decision — fused turn nodes.** The graph draws a user message and
+its assistant reply as one card. This is a *rendering* choice only; section 6's
+message-as-node rule is untouched and remains locked. The fusion **splits
+automatically** whenever a user message has more than one assistant child, which
+is exactly the eval fan-out (one prompt, five strategies) and regeneration cases
+that message-as-node exists to represent. Common case reads clean; the case the
+thesis depends on stays truthful.
+
+**Sequencing constraint — the part that protects the original rationale.**
+Section 4's concern was ordering, not difficulty. ~~Slices 1 through 4 and the
+evaluation framework of section 7 ship **before** the graph.~~ **Revised
+2026-08-30, together with section 8.10:** the graph is gated on its own backend
+prerequisite — the recursive-CTE ancestor walk of section 8.4 and the edge
+routes — rather than on a fixed slice order. It is built when that backend
+lands, in parallel with whatever else is in flight.
+
+**What did not change:** the evaluation framework of section 7 is still not
+traded against the graph. If the two ever compete for the same session, section
+7 wins and the graph reverts to MVP+1 without renegotiation. The deferral was
+reversed because the work is cheaper than believed, not because the thesis
+became less important.
+
+**Static specimens are not the slice.** As of 2026-08-30 the frontend contains
+presentational graph components (`MiniGraph` in `frontend/src/components/
+specimen.tsx`, rendered on the landing page and the auth panel). These are
+hardcoded illustrations with no data, no interaction and no layout algorithm —
+marketing surfaces, not the navigator. **The graph slice remains unstarted.**
+Do not read the existence of those components as progress against this entry.
+
+### 8.10 UI scope widened; frontend built in parallel (supersedes section 4 item 7, decided 2026-08-30)
+
+Section 4 listed the UI as "**Minimal coherent UI**. Sidebar tree navigation",
+and section 13 names "UI before backend rigor" as an anti-pattern. Both were
+written when the UI was understood as a thin viewer over the interesting part.
+That is revised.
+
+**What changed.** The UI is now a first-class deliverable, built **in parallel**
+with the backend rather than after it, feature by feature — each frontend slice
+tracks a backend capability that has actually shipped. Scope now explicitly
+includes a public landing page, a brand mark and a full design-token system
+across two themes, on top of the in-app surfaces section 4 anticipated.
+
+**Why.** Section 2 makes *published evaluation results* one of three legs of the
+differentiator, and the audience for those results reaches them through a
+front door. A tool that cannot be looked at cannot be shown. The parallel
+cadence also keeps the frontend honest: it can only be built against endpoints
+that exist, which prevents the speculative-UI failure mode section 13 is really
+worried about.
+
+**What section 13's guardrail still means.** "UI before backend rigor" is not
+repealed — it is narrowed to its real target: *building UI for capabilities the
+backend does not have*, and *trading evaluation work for visual work*. Both
+remain anti-patterns. Visual polish on a surface whose backend already ships is
+not.
+
+**The constraint that replaces the old one.** A frontend slice may not begin
+before the backend capability it renders exists. Concretely: frontend slice 2
+(conversation list) is blocked until the conversation routes are written, and
+the graph view is blocked until section 8.4's ancestor walk lands — see the
+revision to section 8.9 above.
+
+**Where the detail lives.** `docs/frontend_design.md` is the companion record
+for the frontend: stack, the locked palette (its section 5), the anti-generic
+constraints (its section 4), and the slice order (its section 8). It is
+subordinate to this document; where they disagree, this one wins.
 
 
 ---

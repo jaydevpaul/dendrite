@@ -32,173 +32,90 @@ populated → branch, null → continuation; regeneration never deletes.
   indexes as specified in section 9. Do not "improve" them without flagging.
 - If the spec is ambiguous or silent on something, ask / flag it rather than
   inventing a decision.
+- **Backend (`app/`): the user hand-types every line** to learn it — present
+  code in chat, do not edit those files. **Frontend (`frontend/`), `tests/` and
+  docs: write directly.**
+- A frontend slice may not begin before the backend capability it renders
+  exists (decision record §8.10).
 
-## Current task
-Set up the Python project (dependencies, folder structure), then write the
-SQLAlchemy models transcribing section 9 of the decision record. Nothing beyond
-the models this session — no auth, no routes, no business logic yet.
+## Current state (2026-08-30)
+
+**Built:** models + Alembic migrations · `/health` · full auth
+(`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
+45 backend tests · frontend slice 1 (landing, signup/login, route guards,
+theme toggle) verified end to end through the Vite proxy.
+
+**Not built:** conversation/message routes, generation, summarization,
+embeddings, eval framework, the graph navigator.
+
+**⚠ Nothing is committed yet** — auth, tests and all of `frontend/`.
+
+### Running it
+
+```
+docker compose up -d                          # Docker Desktop must be running
+uvicorn app.main:app --reload --port 8000     # repo root, .venv active
+cd frontend && npm run dev                    # :5173
+pytest                                        # repo root, 45 passing
+```
+
+**The DB is on host port 5433, not 5432.** A native Windows Postgres service
+keeps reclaiming 5432 and it *also* has a `dendrite` role and database, so a
+wrong port connects successfully into an empty schema instead of failing —
+Alembic's "target database is not up to date" was the only symptom. `.env`
+exists locally (gitignored) and **overrides code defaults**, so a stale port
+there silently re-breaks the connection.
+
+### Standing gotchas
+
+- **Always review Alembic autogenerate output.** It has needed hand-correction
+  3 times out of 3: missing `pgvector` import, no `CREATE EXTENSION vector`,
+  the `use_alter` circular FK silently dropped, and unnamed constraints that
+  make `downgrade()` unrunnable. `metadata.create_all` handles the circular FK;
+  Alembic does not.
+- **Never add CORS middleware, never weaken the cookie to `SameSite=None`.**
+  The Vite proxy (`/auth`, `/health` → :8000) makes both unnecessary. See
+  `frontend_design.md` §3 — the half-configured-CORS failure mode is silent.
+- Do not pipe a backgrounded dev server through `tail` — it buffers and the log
+  stays empty.
+- Anything rendered on the frontend's fixed-dark brand panel needs a
+  `tone="panel"` variant, or it breaks in light mode.
+
+## Companion docs
+
+- `docs/Dendrite_Decision_Record.md` — authoritative spec; wins over everything.
+- `docs/auth_design.md` — auth architecture, threat model, flows.
+- `docs/frontend_design.md` — frontend stack, **locked palette** (§5), slice order.
+- `docs/PROGRESS.md` — full session history. Read on demand.
+
+## Next task
+**Backend: conversation + message routes.** This is where `CurrentUser` starts
+scoping every query (the authorization discipline in `auth_design.md` §4.3 —
+every query filtered by `user.id`, or it is an IDOR) and where the §8.4
+recursive-CTE ancestor walk gets built. Frontend slice 2 (conversation list) is
+blocked until these exist.
 
 ## Progress log
-Update this at the END of each session: what was built, what's next, any
-decision made. This is what a future session reads to pick up cleanly.
 
-- **2026-07-11**: Project scaffolded (`pyproject.toml`, `app/core/` for
-  config+async db engine+uuid7 helper, `app/models/` for the six entities).
-  All models transcribed field-for-field from decision record section 9,
-  verified by compiling actual `CREATE TABLE`/`CREATE INDEX` DDL against the
-  Postgres dialect (no live DB needed) — every CHECK constraint, FK, and
-  index matches. Two decisions made to fill gaps section 9 left open:
-  - Added a minimal stub `User` model (id + created_at only) since
-    `Conversation.user_id` needs a real FK target but `User` isn't one of
-    the six entities and auth is deferred (section 12). Expand/replace when
-    auth lands.
-  - DB access is async (SQLAlchemy 2.0 async ORM + asyncpg), matching the
-    async-first stack (FastAPI, arq) — not explicitly locked in the record,
-    flagged and confirmed with the user.
-  - Technical note, not a decision: `Conversation.root_message_id` ↔
-    `Message.conversation_id` form a circular FK. Resolved with
-    `use_alter=True` on the `root_message_id` FK (SQLAlchemy emits it as a
-    separate `ALTER TABLE` after both tables exist) — no schema change, just
-    how it's created.
-  - Next: nothing beyond models this session per scope. Future sessions:
-    Alembic/migration setup, auth (section 12), then routes/business logic.
+Full history is in **`docs/PROGRESS.md`** — this section carries only the most
+recent entry. At the end of each session, append there and replace the entry
+below. If a fact will still matter in three months (a port, a run command, a
+standing gotcha, a working rule), promote it into **Current state** above
+instead of leaving it buried in a dated entry.
 
-- **2026-07-12**: No new files; one edit to `app/core/db.py` (by
-  user/linter, not this session's own work, but carried forward here since
-  it changes generated DDL): `Base` now sets
-  `type_annotation_map = {str: Text}`, so every `Mapped[str]` column (e.g.
-  `Edge.anchored_text`, `Edge.strategy_override`) compiles to Postgres
-  `TEXT` instead of the previous default `VARCHAR`. Verified by recompiling
-  `CreateTable(Edge.__table__)` against the Postgres dialect in a scratch
-  venv — output confirmed, venv discarded after. This actually brings the
-  models closer to the decision record's global rule ("`text` everywhere,"
-  section 9) that the original models weren't fully honoring.
-  - Also answered questions (no code changes): confirmed no `.venv` is
-    committed (excluded via `.gitignore`), confirmed `git init` has not
-    been run yet.
-  - Next: same as prior entry — Alembic/migration setup, auth (section 12),
-    then routes/business logic. Git repo still needs to be initialized
-    when the user is ready.
-
-- **2026-07-23**: Stood up the local DB and Alembic; first migration applied.
-  - **Local dev DB is now Docker**, not the native install. Native PG18 (EDB
-    installer) doesn't ship pgvector and the machine had no C++ build tools,
-    so instead of compiling we run `pgvector/pgvector:pg18` as container
-    `dendrite-pg` (port 5432, named volume `dendrite_pgdata`). Native PG
-    service stopped + set to Manual to free 5432 (reversible). Container env
-    vars auto-create the `dendrite` role + DB, matching the app's default
-    config — so no `.env` was needed (none committed; running on defaults).
-    **Future sessions: `docker start dendrite-pg` before doing DB work.**
-  - Added `alembic` dependency; `alembic init -t async alembic` (async
-    template because our only driver is asyncpg). Wired `alembic/env.py`:
-    `config.set_main_option("sqlalchemy.url", settings.database_url)`,
-    `target_metadata = Base.metadata`, and `import app.models` so all seven
-    tables register for autogenerate.
-  - Autogenerated + hand-corrected the first migration
-    `alembic/versions/4624be06dde7_initial_schema.py`. Three autogen gaps
-    fixed:
-    1. missing `import pgvector.sqlalchemy.vector` (would `NameError`);
-    2. no `CREATE EXTENSION vector` — added as first stmt of `upgrade()`
-       (dropped in `downgrade()`), else the `vector(1536)` column fails;
-    3. **circular FK was silently dropped** — `use_alter=True` excludes the
-       `conversation.root_message_id → message.id` FK from `CREATE TABLE`,
-       and Alembic (unlike `metadata.create_all`) has no automatic
-       post-create ALTER, so the FK would never be created. Replaced the
-       inline `use_alter` FK with an explicit `op.create_foreign_key` after
-       `message` exists (+ `drop_constraint` first in `downgrade`).
-  - Reviewed with `alembic upgrade head --sql` (dry run) before applying,
-    then `alembic upgrade head`. Live DB verified: 8 tables (7 + 
-    `alembic_version`), pgvector 0.8.5, circular FK present, HNSW index
-    `USING hnsw (embedding vector_cosine_ops)`, revision `4624be06dde7`.
-  - Next: auth (section 12) to replace the `User` stub, then routes/business
-    logic.
-
-- **2026-07-27**: FastAPI app skeleton — first bit of the API layer, no
-  business logic. Flagged first that the log's "auth next" is blocked: auth
-  approach is an *undecided* open item (section 12), so it can't be coded
-  without a decision. Built the decision-free plumbing instead:
-  - `app/core/db.py`: added `get_session`, an async `AsyncSession`-per-request
-    FastAPI dependency over the existing `async_session_factory`.
-  - `app/api/routes/health.py` (new `app/api/` + `app/api/routes/` packages):
-    `GET /health` (liveness) and `GET /health/db` (readiness; runs `SELECT 1`
-    through `get_session`).
-  - `app/main.py`: added a `lifespan` that disposes the engine pool on
-    shutdown; mounted the health router.
-  - Verified against live `dendrite-pg` (venv Python, direct handler calls —
-    `TestClient` unusable, see below): `/health` → `{status: ok}`,
-    `/health/db` → `{status: ok, database: reachable}`.
-  - Note for future test work: `httpx` is NOT installed, so FastAPI
-    `TestClient` fails to import. When real route tests land, add `httpx` +
-    `pytest`/`pytest-asyncio` as dev deps (left out here — scope was skeleton
-    only).
-  - Next: the auth-approach decision (roll-your-own vs Clerk/Supabase/Auth0),
-    ideally taken together with the other two Weeks 3–6 open items — LLM
-    provider abstraction and deployment target — then real routes.
-
-- **2026-08-30**: Auth built end-to-end — the API's first real feature.
-  Started by closing the three Weeks 3–6 open items (section 12), since the
-  log's standing "auth next" was blocked on an undecided approach. All three
-  now recorded as **section 8.8** of the decision record, and struck through
-  in section 12:
-  - **Auth: roll-your-own minimal.** Hosted auth (Supabase/Clerk/Auth0) keeps
-    its user records in the provider's store, which would mean a second
-    database alongside `dendrite-pg` plus a mirror-row sync path to keep the
-    `user_id` FK valid — real complexity for a column this project barely
-    reads.
-  - **LLM provider: thin abstraction from day one** (protocol + one concrete
-    impl). Not built yet — decision only.
-  - **Deployment: SSE, not websockets** (generation is server→client only);
-    long-lived container rather than serverless (cold starts alone can eat the
-    1–2s composition budget of section 8.6). Hosting stays local through eval.
-  - Full design written to `docs/auth_design.md` — threat model, why argon2
-    over SHA-256, stateless-vs-stateful sessions, cookie flag rationale, the
-    four flows, and the settled parameters (7-day TTL, signup auto-logs-in,
-    `GET /auth/me`, min password length 8 and no composition rules).
-  - Also deferred, with reasoning, in section 12: `User.display_name`
-    (trigger: when the frontend renders a name). `username` rejected outright
-    — a public handle buys nothing without a social surface and costs a second
-    unique constraint, case-folding, reserved names, and login ambiguity.
-  - **Built:** `app/core/security.py` (argon2 via `passlib` CryptContext,
-    HS256 JWTs via `pyjwt`, module-level `DUMMY_HASH`); `app/schemas/auth.py`;
-    `app/services/auth.py`; `app/api/deps.py` (`get_current_user` +
-    `CurrentUser` alias); `app/api/routes/auth.py` (`/auth/signup`, `/login`,
-    `/logout`, `/me`), mounted in `main.py`. `config.py` gained
-    `secret_key` / `access_token_ttl` / `cookie_*`; an unset key generates an
-    ephemeral one with a warning rather than shipping a real default.
-  - **Schema:** `User` extended with `email` (NOT NULL, UNIQUE) +
-    `password_hash` (NOT NULL), both `TEXT` via the `Base` type map. Migration
-    `7fed33945b5c` applied. Autogenerate emitted `create_unique_constraint(None, ...)`
-    — fine on upgrade, but `drop_constraint(None, ...)` makes `downgrade()`
-    unrunnable, so the constraint was named `uq_user_email` by hand. (Third
-    time autogenerate output has needed correcting; keep reviewing it.)
-  - **Tests:** new `tests/` at repo root — `conftest.py` creates a separate
-    `dendrite_test` database (AUTOCOMMIT for `CREATE DATABASE`), builds schema
-    via `Base.metadata.create_all`, truncates between tests, and exposes an
-    `httpx` client fixture using `app.dependency_overrides` to swap
-    `get_session`. **45 tests** across pure crypto, service, and route layers.
-    Note `create_all` handles the `use_alter` circular FK automatically — the
-    exact thing Alembic does not, per the 2026-07-23 entry. Dev deps added:
-    `pytest`, `pytest-asyncio`, `httpx`.
-  - **⚠ Local DB now runs on port 5433 via `docker-compose.yml`.** The native
-    Windows Postgres service (`postgresql-x64-18`) had reinstated itself —
-    an EDB installer update reset it to Automatic and it took IPv4 `:5432`,
-    leaving Docker bound only to IPv6. Because that native server *also* has a
-    `dendrite` role and database, connections succeeded silently into an empty
-    schema; Alembic's "Target database is not up to date" was the only thing
-    that caught it. Fixed durably by moving the container's host port to 5433
-    rather than fighting for 5432 again. Also converted the hand-run
-    `docker run` container into Compose (same `dendrite_pgdata` volume, marked
-    `external: true`).
-    **Future sessions: `docker compose up -d` (not `docker start`), and make
-    sure Docker Desktop itself is running.**
-  - A `.env` now exists locally (gitignored) holding `DENDRITE_SECRET_KEY` and
-    the 5433 URL; `.env.example` updated to match. Note `.env` overrides the
-    code default — a stale port there silently re-broke the DB connection
-    after it had been fixed in `config.py`.
-  - Working-style note: the user now types all `app/` code by hand for
-    learning; present code in chat rather than editing those files. Test files
-    and docs are fine to write directly.
-  - Next: **none of this is committed yet** — a four-commit plan (docs /
-    infra / feature+tests / session memory) was given but not executed. After
-    that: conversation + message routes, where `CurrentUser` starts scoping
-    every query and the section 8.4 ancestor-walk gets built.
+- **2026-08-30 (session close)**: Frontend slice 1 complete and verified.
+  - `frontend/` builds clean, route-level chunks split, backend's 45 tests
+    still pass. Auth verified end to end through the Vite proxy on :5173 —
+    401 → 201 signup w/ `Set-Cookie` → 200 `/auth/me` → 409 dup → 401 bad
+    password → 422 short password → 204 logout → 401.
+  - Palette **LOCKED** (`frontend_design.md` §5): ground `#232323`, ink
+    `#EDE6D6`, accent `#9BC47A`. Logo is a leaf whose veins branch.
+  - Two superseding entries written to the decision record, both user-approved:
+    **§8.10** (UI scope widened; frontend built in parallel with the backend)
+    and **§8.9 revised** (graph gated on its own backend prerequisite, not a
+    fixed slice order; `MiniGraph` and friends are static specimens, *not* the
+    graph slice — do not mistake them for progress).
+  - Docs restructured: this log was split out to `docs/PROGRESS.md`. `CLAUDE.md`
+    is auto-loaded every session and had grown to ~6,950 tokens, ~6,460 of it
+    log; it now carries rules, durable state, and the latest entry only.
+  - **Next: backend conversation + message routes.** See *Next task* above.

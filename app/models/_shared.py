@@ -1,15 +1,36 @@
+from typing import Literal,get_args
+
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 UUIDType = PG_UUID(as_uuid=True)
 
-ALL_STRATEGIES = (
+# The Five strategies
+AnyStrategy = Literal[
     "FullInheritance",
     "ParentOnly",
     "SpanOnly",
     "HierarchicalDecay",
     "HierarchicalDecayWithRetrieval",
-)
-NON_SPAN_STRATEGIES = tuple(s for s in ALL_STRATEGIES if s != "SpanOnly")
+]
+# SpanOnly is branch-only - never a conversation default.
+NonSpanStrategy = Literal[
+    "FullInheritance",
+    "ParentOnly",
+    "HierarchicalDecay",
+    "HierarchicalDecayWithRetrieval",
+]
+
+
+ALL_STRATEGIES = get_args(AnyStrategy)
+
+NON_SPAN_STRATEGIES = get_args(NonSpanStrategy)
+
+if set(NON_SPAN_STRATEGIES) != set(ALL_STRATEGIES) - {"SpanOnly"}:
+    raise RuntimeError("Strategy list drift: NonSpanStrategy is out of sync with AnyStrategy")
+
+DEFAULT_STRATEGY: NonSpanStrategy = "HierarchicalDecayWithRetrieval"
+
+
 
 
 def _sql_string_list(values: tuple[str, ...]) -> str:
