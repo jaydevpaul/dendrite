@@ -410,3 +410,82 @@ Related documents:
     one route that had escaped it.
   - **Next: frontend slice 2** (conversation list), then backend Layer B —
     message + edge routes and the §8.4 ancestor walk.
+
+- **2026-09-01**: Frontend slice 2 (conversation list) and backend B1 (message
+  + edge write layer) both built. Tests 69 → 103.
+  - **Frontend slice 2** — `features/conversations/{api,queries,strategy-tag}`,
+    `lib/format.ts` (relative time via `Intl`, no date library), `routes/
+    conversations.tsx` (list + inline composer + empty state) and
+    `routes/conversation.tsx` (detail + rename). `routes/home.tsx` deleted.
+    `Input` gained `forwardRef` so the composer can focus itself. Verified
+    through the proxy on :5173 in 13 steps.
+  - **All four conversation routes are rendered**, not just the list — a list
+    whose rows lead nowhere is not usable, and `GET|PATCH /conversations/{id}`
+    are shipped capability, so it is inside §8.10 rather than scaffolding ahead.
+  - **Slice 3 will move the list into a persistent sidebar.** The user's
+    framing: the app should read like ChatGPT/Claude — familiar linear chat as
+    the main surface, branching as the layer on top, clicking a branch opens
+    that branch's chat. A separate list *page* is the less familiar shape. The
+    API layer, hooks and rows all carry over.
+  - **Backend B1** — `POST|GET /conversations/{id}/messages`, nested so the
+    path id feeds `OwnedConversation` and no new Vite proxy entry is needed.
+    New: `app/schemas/message.py`, `app/services/message.py`,
+    `app/api/routes/messages.py`; 34 tests in `tests/test_message_routes.py`.
+  - **Six spec-silent questions settled before typing** (all six are the
+    LOCKED-adjacent list raised at session close): nested route; one POST
+    writes message *and* edge in one transaction (a message with no edge is an
+    invalid graph state); anchor validated against the parent's real text in
+    the service, since a CHECK constraint cannot read another table's row;
+    parent must share the conversation — a plain FK permits attaching to a
+    stranger's message, which would leak their text into a composed context;
+    second parentless message → 409; no role-alternation rule, because
+    regeneration's two-assistants-one-parent shape is legal and the rule would
+    have to be removed in Layer C.
+  - **`root_message_id` is claimed by a conditional UPDATE**
+    (`WHERE root_message_id IS NULL`, then check `rowcount`), not
+    read-check-write. Two concurrent first messages would both read NULL and
+    both write, and the second silently orphans the first root. The database
+    decides; the loser gets a 409.
+  - **`conversation.updated_at` now moves on every message write**, so the
+    slice-3 sidebar's "most recent first" means most recent *activity*. Nothing
+    else would move it — a message write touches `message` and `edge`, not
+    `conversation`.
+  - **`GET .../messages` returns two flat lists** (`messages` + `edges`), not a
+    nested tree: two plain SELECTs server-side, and the client builds its own
+    parent→children map. Consistent with §6's "a chat window is a view computed
+    at render time, not a stored entity".
+  - **Nine bugs in hand-typed code**, one of them a live security hole:
+    `Message.conversation_id == Conversation.id` (capital C — the class, i.e.
+    the whole table) instead of `conversation.id`, which makes the
+    cross-conversation guard a tautology that every row satisfies. Also
+    `parent_message_id: UUID | None` with no `= None` (Pydantic then treats it
+    as required, which 422'd every root message), `Annotated[int, ...]` for
+    `AnchoredText`, two `anchor_text`/`anchored_text` typos, the SpanOnly check
+    nested one level too deep so it could never fire, `_claim_root`'s
+    parameters in a different order than the call, and 31 lines of
+    `create_message` indented inside the `if parent is not None:` so root
+    messages returned `None`.
+  - **One bug was mine**: `raise RootAlreadyExists(conversation.id)` *after*
+    `await session.rollback()`. Rollback expires every object in the session,
+    so that attribute access is a hidden SELECT — and in async SQLAlchemy, from
+    an exception path, it raises `MissingGreenlet`. Promoted to a standing
+    gotcha.
+  - **Decision record gained §8.12** (message-layer decisions), covering all
+    six items flagged at session close: a `Generation` row belongs to every
+    *generated* assistant message rather than every assistant message (§7's
+    eval fixtures have authored assistant text with nothing to record, and
+    `generation.assistant_message_id` being UNIQUE is the invariant that
+    actually matters); the API refuses empty `content` while the column still
+    permits it for streaming; `root_message_id` is write-once; the
+    same-conversation parent guard is a security boundary living outside the
+    schema; anchor offsets and text must agree at creation, since repair is
+    meaningless otherwise; and `conversation.updated_at` tracks message
+    activity. Plus the two shape decisions (one request writes message + edge;
+    the GET returns two flat lists) and the role-alternation rule deliberately
+    *not* added. Pointer notes added to the three §9 rows involved; the schema
+    itself is unchanged.
+  - **Next: backend B2** — the §8.4 recursive-CTE ancestor walk and strategy
+    resolution by walk-up. Slice 2 and the conversation-layer leftovers are
+    committed (`b7351af`); **B1 is not** — `app/main.py`, the three new `app/`
+    modules, `tests/test_message_routes.py` and this session's docs are still
+    in the working tree.

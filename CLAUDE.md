@@ -38,19 +38,23 @@ populated → branch, null → continuation; regeneration never deletes.
 - A frontend slice may not begin before the backend capability it renders
   exists (decision record §8.10).
 
-## Current state (2026-08-31)
+## Current state (2026-09-01)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
 conversation routes (`POST|GET /conversations`, `GET|PATCH
-/conversations/{id}`) · 69 backend tests · frontend slice 1 (landing,
-signup/login, route guards, theme toggle) verified end to end through the
-Vite proxy.
+/conversations/{id}`) · message + edge write layer (`POST|GET
+/conversations/{id}/messages`) · 103 backend tests · frontend slices 1 and 2
+(landing, signup/login, route guards, theme toggle, conversation list +
+create + detail with rename) verified end to end through the Vite proxy.
 
-**Not built:** message + edge routes, the §8.4 ancestor walk, generation,
-summarization, embeddings, eval framework, the graph navigator.
+**Not built:** the §8.4 ancestor walk, strategy resolution by walk-up,
+generation, summarization, embeddings, eval framework, the graph navigator.
 
-Everything through the conversation layer is committed (`37951c6`).
+Committed through frontend slice 2 (`b7351af`, which also carries the
+`70ccde22e86d` index migration). **Backend B1 is uncommitted** — `app/main.py`
+plus `app/{schemas,services}/message.py`, `app/api/routes/messages.py` and
+`tests/test_message_routes.py`, along with this session's doc updates.
 
 ### Running it
 
@@ -58,7 +62,7 @@ Everything through the conversation layer is committed (`37951c6`).
 docker compose up -d                          # Docker Desktop must be running
 uvicorn app.main:app --reload --port 8000     # repo root, .venv active
 cd frontend && npm run dev                    # :5173
-pytest                                        # repo root, 69 passing
+pytest                                        # repo root, 103 passing
 ```
 
 **The DB is on host port 5433, not 5432.** A native Windows Postgres service
@@ -82,7 +86,9 @@ there silently re-breaks the connection.
   half-configured-CORS failure mode is silent. **Every new route prefix needs
   its own proxy entry** in `vite.config.ts` (`/auth`, `/health`,
   `/conversations` → :8000); miss one and Vite returns `index.html` instead of
-  JSON, which reads like a backend bug and is not one.
+  JSON, which reads like a backend bug and is not one. Nesting new routes under
+  an existing prefix (as `/conversations/{id}/messages` does) sidesteps this
+  entirely — a reason to prefer it, not just tidiness.
 - **Every conversation query goes through `app/services/conversation.py`.**
   `get_owned_conversation()` is the single ownership choke point, and the
   `OwnedConversation` dependency in the routes means a handler cannot obtain a
@@ -93,6 +99,20 @@ there silently re-breaks the connection.
   autogenerate correctly sees nothing. It only fires on UPDATEs SQLAlchemy
   emits, not on raw SQL. (`server_onupdate=` merely *asserts* a trigger exists;
   it does not create one.)
+- **After `await session.rollback()`, treat every ORM object as empty.**
+  Rollback *expires* every object in the session, so a later `obj.attr` is a
+  hidden SELECT — and from an exception path in async SQLAlchemy that raises
+  `MissingGreenlet`, not a clean error. Read out any value you still need
+  *before* rolling back. (Cost one debugging round in B1's `_claim_root`.)
+- **A CHECK constraint only ever sees the row being written.** Anything that
+  has to compare against another table's row — the anchor against the parent's
+  text, the parent against this conversation — is an app-layer check in the
+  service, returning 422/404 rather than a 500 from an IntegrityError. The DB
+  constraints stay as the backstop.
+- **Capital `Conversation` is the table; lowercase `conversation` is the row
+  you own.** `Message.conversation_id == Conversation.id` typechecks, runs, and
+  is a tautology every row satisfies — it silently deletes the ownership guard
+  and adds a cross join. This exact typo shipped once in B1.
 - Do not pipe a backgrounded dev server through `tail` — it buffers and the log
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
@@ -106,16 +126,19 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Frontend slice 2 — conversation list** (`frontend_design.md` §8: list,
-create, empty state). Unblocked as of 2026-08-31; the conversation routes it
-renders now exist. Remember the `/conversations` proxy entry.
+**Backend B2 — the §8.4 ancestor walk.** A recursive CTE stepping up via
+`edge.child_message_id`, plus **strategy resolution by walk-up** (§6: take the
+message's parent edge; non-null `strategy_override` wins; else step to that
+edge's parent and repeat; reach the root with no hit → `Conversation.
+default_strategy`). §8.4 bounds the walk at ~depth 3 and forbids path
+enumeration or a closure table pre-emptively. The write layer it reads (B1) is
+built and tested.
 
-After that, **backend Layer B: message + edge routes and the §8.4
-recursive-CTE ancestor walk** — message create/list, `root_message_id` set on
-the first message, Edge creation (anchors → branch, null → continuation, the §9
-CHECK constraints have never been exercised), and strategy resolution by
-walk-up. Note that message creation without generation is a partial feature:
-nothing composes context or calls a model until Layer C.
+After that, **frontend slice 3 — linear chat**, which is blocked on generation
+(Layer C). Slice 3 also **moves the conversation list into a persistent left
+sidebar**: the app should read like ChatGPT/Claude, with familiar linear chat
+as the main surface and branching as the layer on top. Today's separate list
+page is the less familiar shape; the API layer, hooks and rows carry over.
 
 ## Progress log
 
@@ -125,53 +148,21 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-08-31 (session close)**: Backend conversation layer built, tested and
-  committed (`37951c6`); frontend slice 2 is now unblocked.
-  - **Routes**: `POST /conversations`, `GET /conversations`,
-    `GET|PATCH /conversations/{id}`. No DELETE — deferred to `ROADMAP.md`.
-  - **Ownership is structural, not remembered.** All queries live in
-    `app/services/conversation.py`; the `OwnedConversation` FastAPI dependency
-    means a route body cannot get a `Conversation` without the `user_id` filter
-    having run. Unowned rows → **404, not 403**.
-  - **`updated_at` now moves**: `onupdate=func.now()` on Conversation and
-    Message. It had never been set, so the column was frozen at insert and any
-    "newest first" ordering would have silently sorted by creation time. **No
-    migration** — `onupdate` is SQLAlchemy-side and emits no DDL.
-  - **Strategies are now `Literal` types** (`AnyStrategy`, `NonSpanStrategy` in
-    `app/models/_shared.py`), with the tuples derived via `get_args` and a
-    runtime drift guard. One source drives both the SQL CHECK constraints and
-    the Pydantic schemas, and OpenAPI gets a real enum for slice 6's strategy
-    picker. Values and order unchanged, so the CHECK SQL is byte-identical.
-  - **Tests 45 → 69** (`tests/test_conversation_routes.py`, 24 new). The
-    ownership group is the load-bearing one; `test_patch_404s_on_another_users
-    _conversation` also re-reads as the owner to prove the rejected write never
-    landed, since a status-code-only assertion would pass either way.
-  - **`ROADMAP.md` created** — first entry is `AdaptiveBudget`, the user's
-    "fill the window if it fits, decay only when it doesn't" idea, recorded as
-    an **eval hypothesis with a trigger** rather than built. Rejected as a
-    default for three reasons: the metric is quality *per token*, so spending
-    because there is room is the wastes-tokens half of the §1 binary; branch
-    context that merely *fits* is still distractor context and contradicts the
-    span anchor; and an adaptive strategy blurs the eval by behaving as
-    `FullInheritance` on short conversations. Also: §8.4 bounds the ancestor
-    walk at ~depth 3, so at MVP scale it would resolve to `FullInheritance`
-    nearly always — shipping the naive baseline as the product default.
-  - **`DEFAULT_STRATEGY = "HierarchicalDecayWithRetrieval"`** (user's call). §5
-    and §9 are both silent on what a new conversation gets. Chosen as the full
-    thesis; §8.6 already specifies degrading to `HierarchicalDecay` when the
-    embedding service is unavailable, which is the state of the world until the
-    embedding pipeline exists. **Not yet in the decision record** — see the
-    LOCKED questions raised at session close.
-  - **`.gitattributes` added** (`* text=auto eol=lf` + binary rules). Line
-    endings were a per-machine `core.autocrlf` fact; now a repo fact. Verified
-    a no-op for existing content — `git ls-files --eol` showed everything
-    already stored as LF.
-  - **Two bugs caught reviewing hand-typed code**: an inverted drift guard in
-    `_shared.py` (`==` where `!=` was meant, so the module raised on *success*
-    and nothing imported), and `response_model=list[Conversation]` on the list
-    route — the SQLAlchemy model, not `ConversationOut`. The second mattered
-    twice: FastAPI rejects it at decoration time, *and* `ConversationOut` is the
-    allowlist keeping `user_id` out of responses, so the list endpoint was the
-    one route that had escaped it.
-  - **Next: frontend slice 2** (conversation list), then backend Layer B —
-    message + edge routes and the §8.4 ancestor walk.
+- **2026-09-01**: Frontend slice 2 (conversation list) and backend B1 (message
+  + edge write layer) built; tests 69 → 103. Six spec-silent questions settled
+  first — nested `/conversations/{id}/messages`, one POST writing message *and*
+  edge in one transaction, anchor validated against the parent's real text,
+  parent must share the conversation (a plain FK otherwise lets you attach to a
+  stranger's message), a second parentless message → 409, and no
+  role-alternation rule. `root_message_id` is claimed by a conditional
+  `UPDATE ... WHERE root_message_id IS NULL` so two concurrent first messages
+  cannot both win. `conversation.updated_at` now moves on every message write,
+  for the slice-3 sidebar's activity ordering. `GET .../messages` returns two
+  flat lists (messages + edges), not a nested tree. Nine bugs found in
+  hand-typed code, one a live security hole (`Conversation.id` for
+  `conversation.id`); one bug was mine (`conversation.id` read after
+  `session.rollback()` → `MissingGreenlet`). All six LOCKED-adjacent decisions
+  are now written into the decision record as **§8.12**, with pointer notes on
+  the three §9 rows they touch.
+  **Next: backend B2** — the §8.4 recursive-CTE ancestor walk and strategy
+  resolution by walk-up.

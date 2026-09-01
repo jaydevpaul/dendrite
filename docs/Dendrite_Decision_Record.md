@@ -2,7 +2,7 @@
 type: project-decision-record
 project: Dendrite
 status: Phase 2 — data layer fully locked; ready for implementation
-updated: 2026-08-30
+updated: 2026-09-01
 ---
 
 # Dendrite — Complete Decision Record
@@ -544,6 +544,114 @@ a single-column index on an FK that is filtered on, which is the criterion
 section 9 states for the six it already blesses; `conversation.user_id` was
 absent only because no route existed when the set was written.
 
+### 8.12 Message-layer decisions (decided 2026-09-01)
+
+Recorded when the message + edge write layer (`POST|GET
+/conversations/{id}/messages`) landed. Six things section 9 was silent on or
+that narrow a locked rule. Same spirit as 8.11: the code now embodies these, so
+they belong here rather than in a session log.
+
+**A `Generation` row belongs to every *generated* assistant message — not to
+every assistant message.** This narrows section 6's "One per assistant message;
+many per user message."
+
+`POST .../messages` accepts either role, so a client can write assistant text
+with no Generation behind it. That is not a stopgap awaiting the generation
+layer: section 7's eval harness has to run five strategies against **fixed**
+conversation graphs, and the assistant messages in a fixture were authored, not
+generated, so there is nothing for a Generation row to record. The same is true
+of any imported or seeded conversation.
+
+The invariant the eval actually needs is the one already expressed in the
+schema: `generation.assistant_message_id` is UNIQUE, so a generated message can
+never acquire two Generation rows. "Every assistant message has one" was
+stronger than necessary and is not enforceable without forbidding fixtures.
+
+*Consequence to watch:* a query that joins Message to Generation to find out
+which strategy produced an assistant message must treat a missing row as "not
+generated", not as a data error.
+
+**Empty `content` is refused by the API and still permitted by the column.**
+Section 9 annotates `Message.content` "empty string allowed (streaming starts
+blank)", and that stays true — generation will insert a blank assistant message
+and stream into it. That write is server-side and never passes through
+`MessageCreate`, so the request schema requires `min_length=1` after stripping.
+A narrowing at the API layer only; no DDL, no CHECK.
+
+**`conversation.root_message_id` is write-once.** Section 9 says "NULLABLE (set
+after first message)" and is silent on a second attempt. It is now settable
+exactly once: a parentless message posted to a conversation that already has a
+root is a **409**, and the first message never loses its claim.
+
+The claim is a **conditional UPDATE**, not read-check-write:
+
+```sql
+UPDATE conversation SET root_message_id = :new_id
+WHERE id = :conversation_id AND root_message_id IS NULL
+```
+
+`rowcount = 0` means someone else won. Read-check-write is wrong here because
+two concurrent first messages both read `root_message_id IS NULL` and both then
+write, and the second silently orphans the first root — a message reachable by
+nothing, which no later query would surface. The database arbitrates instead.
+
+This makes `root_message_id` immutable in the same sense section 8.4 locks edge
+topology: every ancestor walk terminates at the root, so a root that can move
+invalidates the same assumptions a re-parented edge would.
+
+**A parent message must belong to the same conversation, enforced in app
+code.** Section 9's `edge.parent_message_id` is a plain FK to Message and none
+of the five CHECK constraints restricts *which* conversation the parent sits in.
+No CHECK can: a CHECK sees only the row being written, and the answer lives in
+another table.
+
+So the guard is one condition inside the parent lookup — `Message.conversation_id
+== conversation.id`, on a Conversation already resolved through the ownership
+choke point. Without it, `parent_message_id` is a way to hang a branch off a
+stranger's message and pull their text into a composed context once the
+composition layer exists. A failure answers **404, not 403**, for the same
+reason as the conversation routes.
+
+Recorded here because it is a security boundary that lives entirely outside the
+schema, and section 9 gives a reader no hint that it exists.
+
+**Anchor offsets and text must agree at creation.** Section 6 says anchors store
+offsets *and* text, and explains what each is for, but never says they must
+start out consistent. They must: repair works by fuzzy-matching the stored text
+to relocate the offsets, which is meaningless if the two never described the
+same span. The service therefore rejects an anchor whose `anchor_end` runs past
+the parent's content, or where `parent.content[start:end] != anchored_text`, as
+a **422**.
+
+Also not expressible as a CHECK — same reason as above, the text being pointed
+at is in another row.
+
+**`conversation.updated_at` moves on every message write.** Section 9 leaves
+Conversation's `updated_at` unannotated, while annotating Message's "(moves only
+on edit)". Conversation's now tracks message activity, so "most recent first"
+in the conversation list means most recent *activity*. Nothing else would move
+it — a message write touches `message` and `edge`, not `conversation` — and
+without it a busy conversation would sort by the moment it was created.
+
+*Related:* the open item on `Message.updated_at` under streaming (section 12)
+is unaffected. That column still moves only on edit, and the question of what
+streaming does to it is still parked on its trigger.
+
+**Two shape decisions, for the record.** Neither touches a locked rule.
+
+- **One request writes the message and its edge**, in one transaction. A
+  separate `POST /edges` would leave a window in which a message exists with no
+  link — an invalid graph state that nothing can find and nothing cleans up.
+- **`GET .../messages` returns two flat lists**, `messages` and `edges`, rather
+  than a nested tree. Two plain SELECTs server-side, and the client builds its
+  own parent→children map. Consistent with section 6: a chat window is a view
+  computed at render time, not a stored entity — so the server should not be
+  the one choosing which path through the graph to nest.
+
+*Not added:* a role-alternation rule (`user` must follow `assistant`). Section 6
+makes a node one message rather than one turn, and section 6 locks "regeneration
+never deletes", so a user message with two assistant children is a legal graph.
+An alternation check would have to be removed the moment generation lands.
 
 ---
 
@@ -566,9 +674,9 @@ Global rules:
 | user_id | uuid | FK → User, NOT NULL |
 | title | text | NOT NULL, default `'Untitled'` (auto-title overwrites it) |
 | default_strategy | text | NOT NULL, CHECK in the 4 non-SpanOnly strategies |
-| root_message_id | uuid | FK → Message, NULLABLE (set after first message) |
+| root_message_id | uuid | FK → Message, NULLABLE (set after first message; **write-once — see 8.12**) |
 | created_at | timestamptz | NOT NULL, default now() |
-| updated_at | timestamptz | NOT NULL, default now() |
+| updated_at | timestamptz | NOT NULL, default now() (**moves on every message write — see 8.12**) |
 
 ### Message
 | Column | Type | Notes |
@@ -576,7 +684,7 @@ Global rules:
 | id | uuid | PK (v7) |
 | conversation_id | uuid | FK → Conversation, NOT NULL |
 | role | text | NOT NULL, CHECK (role IN ('user','assistant')) |
-| content | text | NOT NULL, empty string allowed (streaming starts blank) |
+| content | text | NOT NULL, empty string allowed (streaming starts blank; **the API refuses it — see 8.12**) |
 | created_at | timestamptz | NOT NULL, default now() |
 | updated_at | timestamptz | NOT NULL, default now() (moves only on edit) |
 
