@@ -359,3 +359,54 @@ Related documents:
     paid on every session since `CLAUDE.md` is auto-loaded. `CLAUDE.md` now
     carries the rules, a durable "Current state" block, and the latest entry
     only.
+
+- **2026-08-31 (session close)**: Backend conversation layer built, tested and
+  committed (`37951c6`); frontend slice 2 is now unblocked.
+  - **Routes**: `POST /conversations`, `GET /conversations`,
+    `GET|PATCH /conversations/{id}`. No DELETE — deferred to `ROADMAP.md`.
+  - **Ownership is structural, not remembered.** All queries live in
+    `app/services/conversation.py`; the `OwnedConversation` FastAPI dependency
+    means a route body cannot get a `Conversation` without the `user_id` filter
+    having run. Unowned rows → **404, not 403**.
+  - **`updated_at` now moves**: `onupdate=func.now()` on Conversation and
+    Message. It had never been set, so the column was frozen at insert and any
+    "newest first" ordering would have silently sorted by creation time. **No
+    migration** — `onupdate` is SQLAlchemy-side and emits no DDL.
+  - **Strategies are now `Literal` types** (`AnyStrategy`, `NonSpanStrategy` in
+    `app/models/_shared.py`), with the tuples derived via `get_args` and a
+    runtime drift guard. One source drives both the SQL CHECK constraints and
+    the Pydantic schemas, and OpenAPI gets a real enum for slice 6's strategy
+    picker. Values and order unchanged, so the CHECK SQL is byte-identical.
+  - **Tests 45 → 69** (`tests/test_conversation_routes.py`, 24 new). The
+    ownership group is the load-bearing one; `test_patch_404s_on_another_users
+    _conversation` also re-reads as the owner to prove the rejected write never
+    landed, since a status-code-only assertion would pass either way.
+  - **`ROADMAP.md` created** — first entry is `AdaptiveBudget`, the user's
+    "fill the window if it fits, decay only when it doesn't" idea, recorded as
+    an **eval hypothesis with a trigger** rather than built. Rejected as a
+    default for three reasons: the metric is quality *per token*, so spending
+    because there is room is the wastes-tokens half of the §1 binary; branch
+    context that merely *fits* is still distractor context and contradicts the
+    span anchor; and an adaptive strategy blurs the eval by behaving as
+    `FullInheritance` on short conversations. Also: §8.4 bounds the ancestor
+    walk at ~depth 3, so at MVP scale it would resolve to `FullInheritance`
+    nearly always — shipping the naive baseline as the product default.
+  - **`DEFAULT_STRATEGY = "HierarchicalDecayWithRetrieval"`** (user's call). §5
+    and §9 are both silent on what a new conversation gets. Chosen as the full
+    thesis; §8.6 already specifies degrading to `HierarchicalDecay` when the
+    embedding service is unavailable, which is the state of the world until the
+    embedding pipeline exists. **Not yet in the decision record** — see the
+    LOCKED questions raised at session close.
+  - **`.gitattributes` added** (`* text=auto eol=lf` + binary rules). Line
+    endings were a per-machine `core.autocrlf` fact; now a repo fact. Verified
+    a no-op for existing content — `git ls-files --eol` showed everything
+    already stored as LF.
+  - **Two bugs caught reviewing hand-typed code**: an inverted drift guard in
+    `_shared.py` (`==` where `!=` was meant, so the module raised on *success*
+    and nothing imported), and `response_model=list[Conversation]` on the list
+    route — the SQLAlchemy model, not `ConversationOut`. The second mattered
+    twice: FastAPI rejects it at decoration time, *and* `ConversationOut` is the
+    allowlist keeping `user_id` out of responses, so the list endpoint was the
+    one route that had escaped it.
+  - **Next: frontend slice 2** (conversation list), then backend Layer B —
+    message + edge routes and the §8.4 ancestor walk.

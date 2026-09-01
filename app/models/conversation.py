@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, func, text
+from sqlalchemy import TIMESTAMP, CheckConstraint, ForeignKey, func, text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -35,4 +35,5 @@ class Conversation(Base):
             f"default_strategy IN {NON_SPAN_STRATEGIES_SQL}",
             name="ck_conversation_default_strategy",
         ),
+        Index("ix_conversation_user_id","user_id")
     )

@@ -8,9 +8,9 @@ import { ThemeToggle } from "@/components/theme-toggle";
 /**
  * The chrome every authenticated screen sits inside.
  *
- * Slice 1 has no navigator yet -- the sidebar tree arrives with the
- * conversation routes. What exists now is the header, the identity, and the
- * way out.
+ * There is no navigator here yet: the sidebar tree is slice 5, once the
+ * ancestor walk exists to feed it. What exists now is the header, the
+ * identity, and the way out.
  */
 export function AppShell() {
   const navigate = useNavigate();

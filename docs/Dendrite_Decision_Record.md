@@ -491,6 +491,59 @@ for the frontend: stack, the locked palette (its section 5), the anti-generic
 constraints (its section 4), and the slice order (its section 8). It is
 subordinate to this document; where they disagree, this one wins.
 
+### 8.11 Conversation-layer decisions (decided 2026-08-31)
+
+Recorded in the spirit of section 8.7 — things the code now embodies that
+section 9 was silent on, plus one addition to a LOCKED set. Written when the
+conversation routes landed.
+
+**Create-time `default_strategy` is `HierarchicalDecayWithRetrieval`, and the
+field is optional at the API.** Section 9 gives `Conversation.title` a column
+default (`'Untitled'`) but deliberately gives `default_strategy` none, and
+section 5 says only that it is "the user's choice for the whole conversation,
+set at creation." `POST /conversations` therefore makes the field **optional**,
+falling back to `DEFAULT_STRATEGY` in `app/models/_shared.py`.
+
+This **narrows section 5's wording**: a client need not supply a strategy, and
+most will not — frontend slice 2 creates conversations from a "New chat"
+affordance with no strategy picker in front of it.
+
+The value is the full thesis rather than plain `HierarchicalDecay` because it is
+the thing the project exists to test, and because it costs nothing to set before
+retrieval exists: section 8.6 already specifies degrading to
+`HierarchicalDecay` when the embedding service is unavailable, which is exactly
+the state of the world until the embedding pipeline lands.
+
+The default lives in **app code, not DDL** — no column default was added, so
+section 9's schema is untouched.
+
+*Considered and deferred:* an adaptive, budget-aware strategy ("send the
+ancestor chain in full while it fits; decay only when it doesn't" — what linear
+chat products effectively do). Captured in `ROADMAP.md` as an **eval hypothesis
+with a trigger**, not built. Three reasons it is not the default: section 1's
+metric is quality *per token*, so spending because there is room is the
+wastes-tokens half of the binary this project rejects; context that merely fits
+is still distractor context, and backfilling it contradicts the span anchor the
+user placed; and an adaptive strategy blurs the eval by behaving as
+`FullInheritance` on short conversations while recording a different name. It
+also may not bind — section 8.4 bounds the ancestor walk at roughly depth 3, so
+at MVP scale it would resolve to `FullInheritance` nearly always.
+
+**`conversation.user_id` gains a B-tree index — a seventh entry in section 9's
+LOCKED starting set.** A foreign key does not index the column that holds it;
+Postgres indexes the referenced side (`user.id`, already a PK) and leaves the
+referencing side bare. `conversation.user_id` is filtered on by *every*
+authenticated conversation query — the authorization discipline of
+`auth_design.md` section 4.3 guarantees it — so it was a sequential scan on the
+most-executed predicate in the app. Measured on 200k rows with one match:
+planner cost 4167 → 8.44, pages read 1664 → 4.
+
+This is not a reopening of the "no speculative indexes" rule. That sentence
+defers **composite and partial** indexes pending a measured slow query. This is
+a single-column index on an FK that is filtered on, which is the criterion
+section 9 states for the six it already blesses; `conversation.user_id` was
+absent only because no route existed when the set was written.
+
 
 ---
 
@@ -601,6 +654,8 @@ B-tree indexes (all single-column, on FKs filtered/joined by):
   (separate column from the HNSW index, which is on `embedding`).
 - `generation.user_message_id` — "all generations for this user message" (eval +
   regeneration history).
+- `conversation.user_id` — "all conversations of this user"; filtered on by every
+  authenticated conversation query. **Added 2026-08-31 — see section 8.11.**
 
 No composite or partial indexes yet — those are added only after a measured slow
 query, not speculatively.
@@ -749,6 +804,17 @@ erDiagram
 
 Each is pinned to either a milestone or a trigger condition — none is floating.
 
+- **`Message.updated_at` semantics under streaming.** Section 9 annotates the
+  column "(moves only on edit)", but the models now carry
+  `onupdate=func.now()`, which fires on *any* UPDATE. Harmless today, since
+  edits are the only thing that writes to a message. It stops being harmless
+  once generation streams into a message that section 9 says "starts blank": if
+  the stream is persisted through repeated UPDATEs, the column tracks
+  generation progress rather than edits and the annotation becomes false.
+  Resolving it now would mean inventing the streaming write pattern, which is a
+  generation-layer decision. *Trigger: when generation lands.* Current lean —
+  buffer the stream and write `content` once at completion, which is cheaper
+  regardless and keeps the annotation nearly true.
 - **"Current summary" selection rule** in code (when a message has several
   summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*
 - **Full failure-mode list** for each context-composition step + its fallback —

@@ -4,7 +4,8 @@ Companion to `Dendrite_Decision_Record.md` (the authoritative spec) and
 `auth_design.md`. This file covers the frontend: stack, working cadence, visual
 direction, and the constraints that keep it from looking generic.
 
-Status: agreed 2026-08-30. **Slice 1 built and verified end to end** (see section 8).
+Status: agreed 2026-08-30. **Slices 1 and 2 built and verified end to end**
+(see section 8).
 
 ---
 
@@ -394,7 +395,7 @@ The user's requirement is "smooth, not heavy."
 | Slice | Backend prerequisite | Frontend |
 |---|---|---|
 | ~~**1. Shell + auth**~~ **DONE** | done (2026-08-30) | Vite scaffold, Tailwind v4 + shadcn-idiom components, palette tokens, app shell, signup/login pages, route guards on `/auth/me`, logout, theme toggle |
-| 2. Conversation list | conversation routes | List, create, empty state |
+| ~~**2. Conversation list**~~ **DONE** | done (2026-08-31) | List, inline create, empty state, conversation detail with rename |
 | 3. Linear chat | message routes + generation | Message thread, composer, streaming via SSE |
 | 4. Span branching | edge routes + anchors | Text selection → branch action; anchored-span rendering |
 | 5. Tree navigation | ancestor walk | Sidebar tree, branch/continuation distinction |
@@ -452,6 +453,66 @@ duplicate email → 401 on wrong password → 422 on a short password → 204 lo
 → 401 after logout. `npm run build` typechecks clean and emits separate chunks
 for `login`, `signup` and `home`. The backend's 45 tests still pass.
 
-**Slice 2 is the next frontend session. Do not scaffold ahead.** Note the graph
-view (decision record section 8.9) ships *after* slices 1–4 and the eval
-framework, not before them.
+### Slice 2 — what shipped, and how it was verified
+
+```
+src/
+├── lib/format.ts                  relative + absolute time via Intl
+├── features/conversations/
+│   ├── api.ts                     typed endpoints, NonSpanStrategy mirror
+│   ├── queries.ts                 key factory + four hooks
+│   └── strategy-tag.tsx           the strategy name, in mono
+└── routes/
+    ├── conversations.tsx          /app       list + composer + empty state
+    └── conversation.tsx           /app/c/:id detail + rename
+```
+
+`routes/home.tsx` is gone — it was slice 1's placeholder and said so.
+
+**All four conversation routes are rendered, not just the list.** The slice
+row above says "list, create, empty state"; the detail page was added because a
+list whose rows lead nowhere is not a usable list, and `GET|PATCH
+/conversations/{id}` are shipped backend capability, so rendering them is
+inside section 8.10 rather than scaffolding ahead. The detail page stops
+exactly where the backend stops: it shows the conversation's facts and says
+plainly that the thread arrives with the message layer.
+
+**The composer is inline, not a modal.** A dialog is the one component in this
+slice that would genuinely have needed Radix (section 2), for a single optional
+field and no destructive choice. `Input` gained `forwardRef` — shadcn's own
+convention — so the composer can focus itself on mount and re-focus after a
+failed submit, which `autoFocus` cannot do.
+
+**An empty title is omitted from the POST body, never sent as `""`.** The
+backend's `Title` is `min_length=1`, so `{"title": ""}` is a 422; omitting the
+field is what asks for the `'Untitled'` server default. Verified both ways.
+
+**No strategy picker here.** POST accepts `default_strategy`, but the picker is
+slice 6, so a new conversation takes the server default and the composer says
+so rather than making a silent choice. `NON_SPAN_STRATEGIES` is mirrored in
+`features/conversations/api.ts` in the same order as `app/models/_shared.py`,
+ready for it.
+
+**A mutation invalidates the list, not just the detail entry.** `updated_at` is
+the list's sort key, so a rename genuinely reorders the list rather than only
+changing a label — confirmed live in step 10 below.
+
+**404 copy does not guess.** The backend answers 404 for both "no such id" and
+"someone else's" on purpose, so the not-found page says exactly that instead of
+claiming to know which.
+
+Verified against the live backend **through the proxy on :5173**, with
+`/conversations` added to `vite.config.ts` — miss that entry and Vite returns
+`index.html` where JSON was expected. Thirteen steps passed: 401 with no cookie
+→ 201 signup → `[]` for a new user → 201 create with no title returning
+`'Untitled'` → **422 on `{"title": ""}`** → 201 create with a title, whitespace
+stripped → list ordered newest-first → 200 on GET one → 200 PATCH moving
+`updated_at` → list reordered by it → 404 on an unknown id → 404 on both GET
+and PATCH for another user's id, whose own list stays `[]` → owner re-reads and
+the rejected write never landed. `npm run build` typechecks clean and emits
+`conversations` and `conversation` as separate chunks. The backend's 69 tests
+still pass.
+
+**Slice 3 (linear chat) is blocked** until the message routes and generation
+exist — section 8.10. Note the graph view (decision record section 8.9) ships
+*after* slices 1–4 and the eval framework, not before them.
