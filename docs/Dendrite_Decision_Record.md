@@ -1151,8 +1151,12 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   absence of a completed `Generation` row, or keeping the row out of the graph
   response until it has text. Not decided now because it depends on what the
   streaming endpoint actually returns to the client, and on whether a second
-  browser tab is expected to see a generation in progress. *Trigger: the first
-  generation route.*
+  browser tab is expected to *know* a generation is running. Note that it
+  cannot see the text either way: under 8.14 the partial reply exists only in
+  server memory and in the SSE stream of the tab that asked for it, so a second
+  tab reads `content = ''` from the database and nothing else. The question is
+  whether that row should be marked as in-flight or hidden until it has text.
+  *Trigger: the first generation route.*
 - ~~**`Message.updated_at` semantics under streaming.** Section 9 annotates the
   column "(moves only on edit)" while the model carries `onupdate=func.now()`,
   which fires on any UPDATE — so persisting a stream chunk by chunk would make
