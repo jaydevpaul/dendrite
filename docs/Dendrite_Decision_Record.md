@@ -835,6 +835,57 @@ not having one.
 
 ---
 
+### 8.14 Streaming write pattern (decided 2026-09-02)
+
+Resolves section 12's open item on `Message.updated_at` under streaming, whose
+trigger was "when generation lands". Decided before Layer C is built rather
+than during it, because it is not really a question about a column — it is
+"how does generation write a streaming reply", and that shapes the generation
+code.
+
+**The stream is buffered in memory and `content` is written once, at
+completion.** Not persisted chunk by chunk.
+
+```
+INSERT message (content = '')      -- once, so the UI has a row to stream into
+   ... chunks go straight to the client over SSE, buffered server-side ...
+UPDATE message SET content = <full text>   -- once
+INSERT generation (...)                    -- once, same transaction
+```
+
+**Why, in order of weight.**
+
+*Anchors make chunk-by-chunk writes worse here than in an ordinary chat app.*
+Section 6 locks anchors as "offsets AND text", and an offset into a string that
+is still growing describes nothing. Persisting the stream would create hundreds
+of moments where a row is real, visible to any query, and not yet anchorable.
+Buffering means a message is only ever blank or final.
+
+*The crash argument for the alternative is weaker than it looks.* Its whole
+advantage is that a mid-stream crash loses nothing — but section 6 locks
+"regeneration never deletes", so the recovery path for a failed generation is
+already to generate again into a new row. Half a persisted reply is not a saved
+reply; it is a truncated one that would be regenerated anyway. Section 8.8 also
+puts hosting on a long-lived container rather than serverless, so death
+mid-request is rare rather than routine.
+
+*It keeps a promise that would otherwise have to be broken.* Section 9
+annotates `Message.updated_at` "(moves only on edit)" and the model carries
+`onupdate=func.now()`, which fires on *any* UPDATE SQLAlchemy emits. With one
+write at completion both stay true as written. Persisting the stream would need
+a second mechanism to keep the column honest — a raw UPDATE bypassing the ORM,
+or dropping `onupdate` and setting it by hand on every edit path — the kind of
+arrangement that is fine when written and wrong six months later.
+
+*Consequence to watch, and it is the reason the next item exists:* the blank
+INSERT means a `GET .../messages` firing mid-stream returns a message whose
+`content` is `''`. That is correct and intended, but a client cannot tell it
+apart from a message that is genuinely empty. **What the graph shows about an
+in-flight generation is a separate decision and is not taken here** — see
+section 12.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:
@@ -866,7 +917,7 @@ Global rules:
 | role | text | NOT NULL, CHECK (role IN ('user','assistant')) |
 | content | text | NOT NULL, empty string allowed (streaming starts blank; **the API refuses it — see 8.12**) |
 | created_at | timestamptz | NOT NULL, default now() |
-| updated_at | timestamptz | NOT NULL, default now() (moves only on edit) |
+| updated_at | timestamptz | NOT NULL, default now() (moves only on edit — stays true under streaming because the stream is buffered and written once; **see 8.14**) |
 
 ### Edge
 | Column | Type | Notes |
@@ -1092,17 +1143,21 @@ erDiagram
 
 Each is pinned to either a milestone or a trigger condition — none is floating.
 
-- **`Message.updated_at` semantics under streaming.** Section 9 annotates the
-  column "(moves only on edit)", but the models now carry
-  `onupdate=func.now()`, which fires on *any* UPDATE. Harmless today, since
-  edits are the only thing that writes to a message. It stops being harmless
-  once generation streams into a message that section 9 says "starts blank": if
-  the stream is persisted through repeated UPDATEs, the column tracks
-  generation progress rather than edits and the annotation becomes false.
-  Resolving it now would mean inventing the streaming write pattern, which is a
-  generation-layer decision. *Trigger: when generation lands.* Current lean —
-  buffer the stream and write `content` once at completion, which is cheaper
-  regardless and keeps the annotation nearly true.
+- **What the graph shows about an in-flight generation.** Section 8.14 buffers
+  the stream and writes `content` once at completion, which leaves a blank
+  message row visible for the duration — correct, but indistinguishable from a
+  genuinely empty message to any client reading `GET .../messages`. The
+  candidates are a `status` column on Message, deriving "generating" from the
+  absence of a completed `Generation` row, or keeping the row out of the graph
+  response until it has text. Not decided now because it depends on what the
+  streaming endpoint actually returns to the client, and on whether a second
+  browser tab is expected to see a generation in progress. *Trigger: the first
+  generation route.*
+- ~~**`Message.updated_at` semantics under streaming.** Section 9 annotates the
+  column "(moves only on edit)" while the model carries `onupdate=func.now()`,
+  which fires on any UPDATE — so persisting a stream chunk by chunk would make
+  the annotation false.~~ **RESOLVED 2026-09-02** → the stream is buffered and
+  written once, so both stay true as written; section 8.14.
 - **Per-message strategy override in the UI.** The column already accepts one on
   any edge (8.13), and the resolver already handles it, so this is a surface
   question rather than a schema one: an override a user can set but cannot see

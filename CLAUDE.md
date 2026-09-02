@@ -150,7 +150,7 @@ there silently re-breaks the connection.
 
 ## Next task
 **Layer C — generation.** The walk it reads (B2) is built and tested, and
-frontend slice 3 is blocked on it. Three things it needs before any route:
+frontend slice 3 is blocked on it. Two things it needs before any route:
 
 - The **`LLMClient` protocol** (`generate` + `embed`) from §8.8, with one
   concrete implementation and a **`FakeLLMClient`** — the fake is what lets
@@ -160,9 +160,12 @@ frontend slice 3 is blocked on it. Three things it needs before any route:
   them. `HierarchicalDecay` also needs the **decay function** behind its own
   interface (§5 locks it swappable) — and that is where §8.4's `~3` full-
   fidelity tier actually lives (§8.13).
-- A decision on **`Message.updated_at` under streaming** — §12's open item,
-  whose trigger is exactly this layer. Current lean recorded there: buffer the
-  stream and write `content` once at completion.
+
+The streaming write pattern is already settled as **§8.14**: buffer the stream
+and write `content` once at completion, so §9's "moves only on edit" stays
+true. Its consequence is the first thing to decide in the layer — a blank
+message row is visible for the duration of a generation, and nothing yet
+distinguishes it from a genuinely empty message (§12's open item).
 
 Streaming is SSE via `StreamingResponse`, not websockets (§8.8).
 
