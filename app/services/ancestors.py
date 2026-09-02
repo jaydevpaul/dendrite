@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from uuid import UUID
+from typing import Literal
 
 from sqlalchemy import literal,select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversation import Conversation
 from app.models.edge import Edge
 from app.models.message import Message
+from app.models._shared import AnyStrategy
 from app.services.message import get_message_in_conversation
 
 
@@ -17,10 +19,20 @@ from app.services.message import get_message_in_conversation
 # a future write path ever creates one.
 WALK_SAFETY_CAP = 200
 
+
+StrategySource = Literal[
+    "edge",                  # an explicit override, the nearest usable one
+    "branch_default",        # a blank branch edge, section 5's SpanOnly default
+    "branch_boundary",       # a branch with nothing usable to offer from below
+    "conversation_default",  # no parent edge at all, or the root was reached
+    "depth_cap",             # the runaway guard fired
+]
+
+
+
+
 class MessageNotFound(Exception):
     """The starting message is not a message in this conversation."""
-
-
 
 @dataclass(frozen=True)
 class AncestorStep:
@@ -39,6 +51,12 @@ class AncestorStep:
 class AncestorWalk:
     steps: list[AncestorStep]
     truncated: bool
+
+@dataclass(frozen=True)
+class StrategyResolution:
+    strategy: AnyStrategy
+    source: StrategySource
+    edge_id: UUID | None
 
 
 async def walk_ancestors(
@@ -125,6 +143,117 @@ async def walk_ancestors(
         ],
         truncated=len(rows)>max_depth
     )
+
+async def resolve_strategy(
+        session: AsyncSession,
+        conversation: Conversation,
+        message_id: UUID,
+        max_depth: int = WALK_SAFETY_CAP
+):
+    """
+    Which of the five strategies applies to this message, and why.
+
+    The rule : the walk never crosses a branch
+    boundary. Any anchored edge ends it - with its override if it has a usable
+    one, with the conversation default if it does not. Continuations keep the
+    walk going.
+    """
+
+    if max_depth < 1:
+        raise ValueError("max_depth must be at least 1")
+
+    start = await get_message_in_conversation(session,conversation,message_id)
+
+    if start is None:
+        raise MessageNotFound(message_id)
+
+
+    def fallback(source: StrategySource, edge_id:UUID |None =None):
+        return StrategyResolution(
+            strategy=conversation.default_strategy, source=source, edge_id=edge_id
+        )
+
+    limit = min(max_depth,WALK_SAFETY_CAP)
+
+    seed=(
+        select(
+            Edge.id.label("edge_id"),
+            Edge.parent_message_id.label("message_id"),
+            Edge.anchor_start.label("anchor_start"),
+            Edge.strategy_override.label("strategy_override"),
+            literal(1).label("depth"),
+        )
+        .join(Message, Message.id==Edge.parent_message_id)
+        .where(
+            Edge.child_message_id == message_id,
+            Message.conversation_id==conversation.id
+        )
+    )
+
+    walk = seed.cte("strategy_walk",recursive=True)
+
+
+    step = (
+        select(
+            Edge.id,
+            Edge.parent_message_id,
+            Edge.anchor_start,
+            Edge.strategy_override,
+            walk.c.depth + literal(1)
+        )
+        .select_from(walk)
+        .join(Edge, Edge.child_message_id==walk.c.message_id)
+        .join(Message, Message.id==Edge.parent_message_id)
+        .where(
+            walk.c.depth < limit,
+            walk.c.anchor_start.is_(None),
+            walk.c.strategy_override.is_(None),
+            Message.conversation_id == conversation.id,
+        )
+    )
+
+    walk= walk.union_all(step)
+
+    result = await session.execute(
+        select(
+            walk.c.depth,
+            walk.c.edge_id,
+            walk.c.anchor_start,
+            walk.c.strategy_override,
+        )
+        .order_by(walk.c.depth.desc())
+        .limit(1)
+    )
+
+    row = result.first()
+
+    if row is None:
+        # No edge points down at this message: it is the root.
+        return fallback("conversation_default")
+
+    depth, edge_id, anchor_start, override = row
+
+    if override is not None:
+
+        if override == "SpanOnly" and depth > 1:
+            return fallback("branch_boundary", edge_id)
+
+        return StrategyResolution(strategy=override, source="edge", edge_id=edge_id)
+
+    if anchor_start is not None:
+        if depth == 1:
+            return StrategyResolution(
+                strategy="SpanOnly", source="branch_default", edge_id=edge_id
+            )
+        return fallback("branch_boundary", edge_id)
+
+
+    if depth == limit:
+        return fallback("depth_cap", edge_id)
+
+    return fallback("conversation_default")
+
+
 
 
 

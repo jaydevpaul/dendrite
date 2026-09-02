@@ -25,61 +25,18 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.conversation import Conversation
-from app.models.edge import Edge
-from app.models.message import Message
-from app.models.user import User
 from app.services.ancestors import MessageNotFound, walk_ancestors
-
-PARENT_TEXT = "pgvector uses HNSW indexes, which trade recall for speed."
-ANCHOR_TEXT = "trade recall for speed"
-ANCHOR_START = PARENT_TEXT.index(ANCHOR_TEXT)
-ANCHOR_END = ANCHOR_START + len(ANCHOR_TEXT)
-
-
-# --- fixture builders --------------------------------------------------
-#
-# Deliberately not going through the API. The API is B1's business and is
-# already tested; here the point is to build graph shapes directly, including
-# ones the API would refuse.
-
-
-async def new_user(session, email="walker@example.com"):
-    user = User(email=email, password_hash="not-a-real-hash")
-    session.add(user)
-    await session.flush()
-    return user
-
-
-async def new_conversation(session, user, default_strategy="HierarchicalDecay"):
-    conversation = Conversation(user_id=user.id, default_strategy=default_strategy)
-    session.add(conversation)
-    await session.flush()
-    return conversation
-
-
-async def new_message(session, conversation, role="user", content="a message"):
-    message = Message(
-        conversation_id=conversation.id, role=role, content=content
-    )
-    session.add(message)
-    await session.flush()
-    return message
-
-
-async def link(session, parent, child, anchor=None):
-    """Attach child under parent. `anchor` makes it a branch, None a continuation."""
-    edge = Edge(parent_message_id=parent.id, child_message_id=child.id)
-
-    if anchor is not None:
-        start, end = anchor
-        edge.anchor_start = start
-        edge.anchor_end = end
-        edge.anchored_text = parent.content[start:end]
-
-    session.add(edge)
-    await session.flush()
-    return edge
+from tests.graph_builders import (
+    ANCHOR_START,
+    ANCHOR_TEXT,
+    PARENT_TEXT,
+    SPAN,
+    chain_of,
+    link,
+    new_conversation,
+    new_message,
+    new_user,
+)
 
 
 async def forked_graph(session):
@@ -106,7 +63,7 @@ async def forked_graph(session):
     e = await new_message(session, conversation, "user", "what is an HNSW index?")
 
     ab = await link(session, a, b)
-    bc = await link(session, b, c, anchor=(ANCHOR_START, ANCHOR_END))
+    bc = await link(session, b, c, anchor=SPAN)
     cd = await link(session, c, d)
     be = await link(session, b, e, anchor=(15, 28))
 
@@ -177,12 +134,7 @@ async def test_the_walk_reaches_the_root_by_default(session):
     user = await new_user(session)
     conversation = await new_conversation(session, user)
 
-    chain = [await new_message(session, conversation, "user", "m0")]
-    for i in range(1, 12):
-        role = "assistant" if i % 2 else "user"
-        child = await new_message(session, conversation, role, f"m{i}")
-        await link(session, chain[-1], child)
-        chain.append(child)
+    chain = await chain_of(session, conversation, 12)
     await session.commit()
 
     walk = await walk_ancestors(session, conversation, chain[-1].id)
