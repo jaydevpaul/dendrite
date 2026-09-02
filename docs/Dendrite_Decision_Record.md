@@ -122,7 +122,7 @@ feature).
 |---|---|---|
 | 1 | `FullInheritance` | Entire ancestor chain at full text (naive baseline). |
 | 2 | `ParentOnly` | Immediate parent message only. |
-| 3 | `SpanOnly` | The anchored span only — no ancestors. **Valid on branches only** (a continuation has no span). |
+| 3 | `SpanOnly` | The anchored span only — no ancestors. **Valid on branches only** (a continuation has no span, and never inherits it — see 8.13). |
 | 4 | `HierarchicalDecay` | Span full + parent full + older ancestors summarized. The contribution without retrieval. |
 | 5 | `HierarchicalDecayWithRetrieval` | Full thesis — decay plus retrieval drill-down. |
 
@@ -141,7 +141,9 @@ Automatic selection is deliberately minimal — this is the *entire* trigger log
 there is no question-type classifier:
 
 - Branches **default to `SpanOnly`** at creation; the user may override to any of
-  the five.
+  the five. (The default is applied at *resolution* time — a branch edge with a
+  null `strategy_override` resolves to SpanOnly; nothing is written into the
+  row. See 8.13.)
 - Continuations do not pick their own strategy — they inherit via walk-up (see
   section 6).
 - `Conversation.default_strategy` is the user's choice for the whole
@@ -206,6 +208,12 @@ take its parent Edge; if `strategy_override` is non-null, use it; else walk to
 the parent of that edge's parent message and repeat. Reach the root with no hit →
 fall back to `Conversation.default_strategy`. Most-specific override wins; nested
 branches govern their own subtree.
+
+**Narrowed by 8.13:** the walk stops at the first *branch* boundary rather than
+always climbing to the root — an anchored edge answers with its override if it
+has a usable one, and with `Conversation.default_strategy` if it does not. That
+is what reconciles this paragraph with section 5's "branches default to
+SpanOnly", and it is also why `SpanOnly` is never inherited downward.
 
 ---
 
@@ -286,6 +294,11 @@ cost of exploiting a bug in that filter.
 Both hot walks are cheap: context composition walks a *bounded* depth (~3);
 strategy resolution *early-terminates* at the first override. A recursive CTE
 with a B-tree on `edge.child_message_id` does each level in one index lookup.
+
+**Clarified by 8.13:** the `~3` here is a *fidelity* tier — how many ancestors
+arrive at full text — not a limit on how far the query climbs. The walk itself
+goes to the root (safety cap 200); reading `~3` as a query bound makes
+`FullInheritance` unbuildable and collapses `HierarchicalDecay` into it.
 
 Do **not** add path enumeration or a closure table pre-emptively — they don't
 help bounded/early-terminating walks and add write cost + a re-parenting
@@ -655,6 +668,162 @@ An alternation check would have to be removed the moment generation lands.
 
 ---
 
+### 8.13 Ancestor-walk and strategy-resolution decisions (decided 2026-09-02)
+
+Decided ahead of the B2 build (the section 8.4 ancestor walk and strategy
+resolution by walk-up), the way 8.12 was decided ahead of B1. Seven items: one
+clarifies 8.4 in a way that materially changes the build, one reconciles two
+locked sentences that pointed different ways, and five are shape decisions the
+spec is silent on.
+
+**The "~3" in 8.4 is a fidelity tier, not a bound on the walk.** Section 8.4
+says context composition "walks a *bounded* depth (~3)". That sentence is about
+cost, and reading it as a hard cap on the query breaks two strategies outright.
+
+Section 5's `FullInheritance` is "the **entire ancestor chain** at full text" —
+unbuildable if the walk stops at three. `HierarchicalDecay` is "span full +
+parent full + **older ancestors summarized**", plural and open-ended; cap the
+walk at three and there are no older ancestors to summarize, the summarization
+layer of 8.5 has nothing to do, and decay becomes byte-identical to full
+inheritance. Section 7's eval would then be comparing five strategies of which
+three are secretly the same one.
+
+Compounding it: message-as-node (section 6) means one conversational exchange is
+*two* rows. Three ancestors is one and a half exchanges of history.
+
+So the three numbers are now named separately:
+
+| | What it limits | Value |
+|---|---|---|
+| The recursive CTE | how far the walk climbs | to the root; safety cap 200 |
+| The strategy | how many ancestors reach the prompt | per strategy (0 for SpanOnly, 1 for ParentOnly, all for the rest) |
+| The decay function | how many arrive at *full* fidelity | ~3 — this is 8.4's number |
+
+The walk carries only `(edge_id, message_id, depth)` through the recursion, so
+depth costs one single-row index lookup per level and no message text; content
+and anchors are joined out once the loop finishes. A 200-level walk is ~1ms.
+Distant ancestors are expensive in *tokens*, not in query time, and answering
+that is the decay function's job, not the walk's.
+
+The cap of 200 is a runaway guard, not a working setting — edge topology is
+immutable (8.4) and `child_message_id` is UNIQUE, so a cycle is not currently
+constructible; the cap exists so a future bug cannot spin the loop forever.
+Section 8.6's "chain unusually deep → cap the walk, accept truncation" is this
+valve. The walk returns a `truncated` flag so a capped result is visible rather
+than silently short, detected by recursing one level past the limit and
+discarding that row.
+
+The `~3` accordingly lives in the decay function, which section 5 already locks
+as swappable — which is where section 7 wants to vary it anyway.
+
+**Strategy resolution never crosses a branch boundary.** Two locked sentences
+pointed different ways. Section 5: "Branches **default to `SpanOnly`** at
+creation." Section 6: "if `strategy_override` is non-null, use it; else walk to
+the parent... Reach the root with no hit → fall back to
+`Conversation.default_strategy`." B1 stores a null override when the client
+sends none, so for an anchored edge with a null override, section 5 says
+SpanOnly and section 6 says keep walking.
+
+The reconciliation is in section 6's own table, which permits null "on
+continuations **and on branches that accept the default**". Null on a branch is
+therefore legal and must *mean* something; section 5 says what. Null on a
+continuation means the other thing — keep walking.
+
+The resolution rule, in full:
+
+| Situation | Answer | `source` |
+|---|---|---|
+| Message has no parent edge (it is the root) | `Conversation.default_strategy` | `conversation_default` |
+| Own parent edge is anchored, override null | **`SpanOnly`** | `branch_default` |
+| Nearest usable non-null override found | that override | `edge` |
+| Branch boundary reached with nothing usable | `Conversation.default_strategy` | `branch_boundary` |
+| Root reached, no hit | `Conversation.default_strategy` | `conversation_default` |
+| Safety cap reached | `Conversation.default_strategy` | `depth_cap` |
+
+"Usable" excludes exactly one thing: `SpanOnly` seen from below. Section 5 locks
+it "valid on branches only (a continuation has no span)", so a continuation two
+levels inside a SpanOnly branch must not resolve to it — that would compose the
+branch's anchored span and drop everything typed inside the branch since, which
+is not a strategy anyone chose.
+
+So **any anchored edge ends the walk**: with its override if it has a usable
+one, with the conversation default if it does not. Three consequences, all
+wanted:
+
+- A branch is a deliberate context reset — the thesis of the whole project. An
+  override set on the trunk should not reach across a branch point into a
+  subtree the user opened precisely to get away from that context.
+  Conversation-wide intent already has a home in `default_strategy`, and that is
+  a value the user actually chose rather than one chosen about a different part
+  of the tree.
+- Section 6's "nested branches govern their own subtree" still holds: an
+  explicit override *on* the branch edge is inherited by everything below it,
+  which is the `edge` row above.
+- The walk is bounded by the distance to the nearest branch above you. The only
+  deep walk is in a conversation with no branches — the case where Dendrite is
+  doing the least interesting work, and still ~1ms.
+
+Expressing it in SQL needs no special case: the recursion continues only while
+the edge just found is a continuation with a null override. Everything else
+terminates the loop, and the terminating row is interpreted in app code.
+
+**Resolution returns a source, not a bare strategy string.** The result carries
+`strategy`, `source` (the six values above), and the deciding `edge_id` where
+one exists. Three reasons: `depth_cap` and `branch_boundary` are degradations
+that section 8.6 requires be visible rather than silent; tests can assert *why*
+an answer was reached, so a right answer arrived at by a wrong path fails
+instead of passing; and `Generation.strategy_used` plus the 8.9 navigator's
+"why did this message get this strategy" both want it.
+
+**The walk returns ancestors only, nearest first, each with its connecting
+edge.** The starting message is not included — the caller already holds it, and
+a depth-0 row invites off-by-one errors in the composer. The parent is depth 1.
+Each step carries the `Edge` linking the level below to it, which is not
+optional: for the first step that edge holds the anchor, and the anchor is the
+entire input to `SpanOnly` and the "span full" half of `HierarchicalDecay`.
+Nearest-first because fidelity decays with distance and a strategy may stop
+early; the composer reverses the list when it assembles the prompt.
+
+**The walk filters on `conversation_id` inside the CTE.** Every ancestor must
+sit in the conversation the walk was handed. Nothing can currently create a
+cross-conversation edge — 8.12 makes that an app-layer check in the message
+service — but the walk is the thing that eventually pulls ancestor *text* into a
+prompt, so if that guard ever leaked this is where a stranger's message would
+arrive in someone's composed context. One extra condition on a row already
+fetched, no measurable cost, and the walk is then safe on its own terms rather
+than by trusting a check made elsewhere.
+
+**The walk takes an already-owned `Conversation`, never a bare message id.**
+Same shape as `create_message`: the signature is `(session, conversation,
+message_id)`, so a caller cannot reach the walk without the ownership choke
+point in `app/services/conversation.py` having run. The starting message is
+resolved through the same `Message.conversation_id == conversation.id` filter
+B1's parent lookup uses — extracted into one shared loader, since the two
+lookups are identical. A message id that is not in this conversation answers
+**404**, for the same reason as 8.11 and 8.12: a 403 confirms the id exists.
+
+**`strategy_override` on a continuation edge stays permitted.** Section 6's
+table says the column is "Null on continuations", and nothing in section 9
+enforces it — the five Edge CHECK constraints do not, and neither does
+`MessageCreate`. That is left as-is deliberately, not overlooked.
+
+Section 6's line describes *intent*, and the resolver handles a non-null
+override on a continuation correctly either way (non-null wins, null keeps
+walking). Forbidding it would cost a new CHECK, a migration and an autogenerate
+review, to remove a capability section 7's eval harness plausibly wants:
+pinning a strategy at an arbitrary point in a fixture graph without going
+through the branch machinery. Meanwhile the user-facing control for "change
+strategy from here on" already exists and needs no new code — `PATCH
+/conversations/{id}` accepts `default_strategy`, and resolution reads it live at
+compose time, so the change applies to later compositions while
+`Generation.strategy_used` keeps the record of what each past reply used.
+
+A finer-grained per-message override is a UI question, not a schema one, and is
+logged in section 12: an override a user can set but cannot see is worse than
+not having one.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:
@@ -697,7 +866,7 @@ Global rules:
 | anchor_start | integer | NULLABLE |
 | anchor_end | integer | NULLABLE |
 | anchored_text | text | NULLABLE |
-| strategy_override | text | NULLABLE, CHECK in the 5 strategies |
+| strategy_override | text | NULLABLE, CHECK in the 5 strategies (null on a branch edge resolves to SpanOnly; permitted on continuation edges — see 8.13) |
 | created_at | timestamptz | NOT NULL, default now() |
 
 Constraints:
@@ -923,6 +1092,14 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   generation-layer decision. *Trigger: when generation lands.* Current lean —
   buffer the stream and write `content` once at completion, which is cheaper
   regardless and keeps the annotation nearly true.
+- **Per-message strategy override in the UI.** The column already accepts one on
+  any edge (8.13), and the resolver already handles it, so this is a surface
+  question rather than a schema one: an override a user can set but cannot see
+  is worse than not having one. The `source` field on a strategy resolution
+  (8.13) is what such a display would read. Until then, `PATCH
+  /conversations/{id}` with a new `default_strategy` is the user-facing control
+  for "compose everything from here on this way". *Trigger: when the chat
+  surface can display which strategy produced a reply, and why.*
 - **"Current summary" selection rule** in code (when a message has several
   summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*
 - **Full failure-mode list** for each context-composition step + its fallback —

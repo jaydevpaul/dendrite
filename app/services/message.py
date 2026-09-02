@@ -22,19 +22,30 @@ class InvalidAnchor(Exception):
     """The anchor does not line up with the parent message's text."""
 
 
+async def get_message_in_conversation(
+        session:AsyncSession,
+        conversation: Conversation,
+        message_id:UUID,
+):
+    """The message with this id - but only if it lives in this conversation."""
+
+    result = await session.execute(
+
+        select(Message).where(
+            Message.id==message_id,
+            Message.conversation_id==conversation.id,
+        )
+    )
+
+    return result.scalar_one_or_none()
+
 async def _load_parent(
         session:AsyncSession,
         conversation:Conversation,
         parent_message_id:UUID
 ):
-    result = await session.execute(
-        select(Message).where(
-            Message.id==parent_message_id,
-            Message.conversation_id==conversation.id
-        )
-        )
-
-    parent =result.scalar_one_or_none()
+    
+    parent =await get_message_in_conversation(session,conversation,parent_message_id)
 
     if parent is None:
         raise ParentNotFound(parent_message_id)
