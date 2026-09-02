@@ -20,6 +20,17 @@ NonSpanStrategy = Literal[
     "HierarchicalDecayWithRetrieval",
 ]
 
+# Where a strategy resolution came from (section 8.13). Four of the five answer
+# with Conversation.default_strategy, so this is what distinguishes "found
+# nothing" from "hit a branch boundary" or "the cap fired".
+StrategySource = Literal[
+    "edge",                  # an explicit override, the nearest usable one
+    "branch_default",        # a blank branch edge, section 5's SpanOnly default
+    "branch_boundary",       # a branch with nothing usable to offer from below
+    "conversation_default",  # no parent edge at all, or the root was reached
+    "depth_cap",             # the runaway guard fired
+]
+
 
 ALL_STRATEGIES = get_args(AnyStrategy)
 

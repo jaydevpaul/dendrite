@@ -1,7 +1,20 @@
-from fastapi import APIRouter,HTTPException, status
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import SessionDep
 from app.api.routes.conversations import OwnedConversation
+
+from app.schemas.ancestors import AncestorChain, StrategyResolutionOut
+
+from app.services.ancestors import (
+    WALK_SAFETY_CAP,
+    MessageNotFound,
+    resolve_strategy,
+    walk_ancestors,
+)
+
 from app.schemas.message import(
     ConversationGraph,
     EdgeOut,
@@ -57,4 +70,27 @@ async def list_all(conversation: OwnedConversation, session: SessionDep):
     return ConversationGraph(
         messages=[MessageOut.model_validate(m) for m in messages],
         edges=[EdgeOut.model_validate(e) for e in edges],
+    )
+
+@router.get("/{message_id}/ancestors", response_model=AncestorChain)
+async def ancestors(
+    message_id: uuid.UUID,
+    conversation: OwnedConversation,
+    session: SessionDep,
+    max_depth: Annotated[int, Query(ge=0, le=WALK_SAFETY_CAP)] = WALK_SAFETY_CAP,
+):
+    """The chain above a message, plus the strategy that will compose it."""
+
+    try:
+        walk = await walk_ancestors(session, conversation, message_id, max_depth)
+        resolved = await resolve_strategy(session, conversation, message_id)
+    except MessageNotFound as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Message not found"
+        ) from exc
+
+    return AncestorChain(
+        steps=walk.steps,
+        truncated=walk.truncated,
+        strategy=StrategyResolutionOut.model_validate(resolved),
     )

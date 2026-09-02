@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from uuid import UUID
-from typing import Literal
 
 from sqlalchemy import literal,select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversation import Conversation
 from app.models.edge import Edge
 from app.models.message import Message
-from app.models._shared import AnyStrategy
+from app.models._shared import AnyStrategy, StrategySource
 from app.services.message import get_message_in_conversation
 
 
@@ -19,14 +18,6 @@ from app.services.message import get_message_in_conversation
 # a future write path ever creates one.
 WALK_SAFETY_CAP = 200
 
-
-StrategySource = Literal[
-    "edge",                  # an explicit override, the nearest usable one
-    "branch_default",        # a blank branch edge, section 5's SpanOnly default
-    "branch_boundary",       # a branch with nothing usable to offer from below
-    "conversation_default",  # no parent edge at all, or the root was reached
-    "depth_cap",             # the runaway guard fired
-]
 
 
 
