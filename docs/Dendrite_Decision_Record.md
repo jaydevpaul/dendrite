@@ -197,7 +197,7 @@ Key rules (locked):
 | Field | On | Meaning |
 |---|---|---|
 | `default_strategy` | Conversation | User's choice for the whole conversation. Excludes SpanOnly. |
-| `strategy_override` | Edge | Set only when a branch overrides the default. Null on continuations and on branches that accept the default. |
+| `strategy_override` | Edge | Set when a branch overrides the default. Null on continuations and on branches that accept the default — **by convention, not enforcement.** Nothing in section 9 forbids one on a continuation edge, and a non-null value there does resolve; section 7's eval harness wants exactly that. See 8.13. |
 | `strategy_used` | Generation | Historical record of what actually ran. |
 
 Intent (`default_strategy` + `strategy_override`) and history (`strategy_used`)
@@ -291,14 +291,25 @@ cost of exploiting a bug in that filter.
 
 ### 8.4 Ancestor-walk indexing — recursive CTE for MVP
 
-Both hot walks are cheap: context composition walks a *bounded* depth (~3);
-strategy resolution *early-terminates* at the first override. A recursive CTE
-with a B-tree on `edge.child_message_id` does each level in one index lookup.
+Both hot walks are cheap: a recursive CTE with a B-tree on
+`edge.child_message_id` does each level in one *single-row* index lookup — the
+column is UNIQUE, so each level matches at most one row — and strategy
+resolution *early-terminates* at the first override.
 
-**Clarified by 8.13:** the `~3` here is a *fidelity* tier — how many ancestors
-arrive at full text — not a limit on how far the query climbs. The walk itself
-goes to the root (safety cap 200); reading `~3` as a query bound makes
-`FullInheritance` unbuildable and collapses `HierarchicalDecay` into it.
+Context composition's walk climbs **to the root**, with a safety cap of 200 as
+a runaway guard (this is 8.6's "chain unusually deep → cap the walk, accept
+truncation"). Depth is affordable because the recursion carries only
+`(edge_id, message_id, depth)`; content and anchors are joined out once the
+loop finishes.
+
+**This sentence used to read "context composition walks a *bounded* depth
+(~3)", which was wrong — corrected 2026-09-02, see 8.13.** The `~3` is a
+**fidelity tier**: how many ancestors arrive at *full text*, which is the decay
+function's business (section 5 locks that swappable) and not the query's. Read
+as a bound on the walk it makes section 5's `FullInheritance` — "the **entire
+ancestor chain** at full text" — unbuildable, and leaves `HierarchicalDecay`
+with no older ancestors to summarize, collapsing it into full inheritance and
+reducing section 7's five baselines to three.
 
 Do **not** add path enumeration or a closure table pre-emptively — they don't
 help bounded/early-terminating walks and add write cost + a re-parenting

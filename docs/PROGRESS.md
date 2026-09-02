@@ -489,3 +489,143 @@ Related documents:
     committed (`b7351af`); **B1 is not** — `app/main.py`, the three new `app/`
     modules, `tests/test_message_routes.py` and this session's docs are still
     in the working tree.
+
+
+## 2026-09-02 — Backend B2: the ancestor walk and strategy resolution
+
+- **Built, in four sittings and four commits** (103 → 155 tests):
+  - **B2.1** (`34931ed` carries the test-infra half; the loader is in
+    `223012e`) — B1's parent lookup extracted into
+    `get_message_in_conversation(session, conversation, message_id)` and
+    shared. It returns `None` rather than raising, because B1 wants a "parent
+    message not found" 404 and B2 wants a "message not found" one; each caller
+    raises its own. One copy of the
+    `Message.conversation_id == conversation.id` condition, which is a security
+    boundary, not a filter.
+  - **B2.2** (`223012e`) — `walk_ancestors(session, conversation, message_id,
+    max_depth=200)` in a new `app/services/ancestors.py`. Recursive CTE, one
+    single-row lookup per level on the unique index on `edge.child_message_id`.
+    Returns `AncestorWalk(steps, truncated)`, nearest first, parent at depth 1,
+    each step carrying the edge attaching the level *below* it — at depth 1
+    that is the edge holding the anchor. 18 tests.
+  - **B2.3** (`98a5ac6`) — `resolve_strategy(...)` → `StrategyResolution(
+    strategy, source, edge_id)`. Same walk, early-terminating. 19 tests.
+  - **B2.4** (`b97258d`) — `GET
+    /conversations/{id}/messages/{message_id}/ancestors`, returning the chain
+    *and* the resolved strategy in one response, plus
+    `app/schemas/ancestors.py`. 15 tests. Nested under the existing prefix, so
+    no new Vite proxy entry.
+
+- **§8.4's "~3" is a fidelity tier, not a bound on the walk.** The single
+  most consequential finding of the session, and it would have quietly gutted
+  §7's eval. §8.4 says composition "walks a *bounded* depth (~3)"; read as a
+  hard cap on the query, §5's `FullInheritance` — "the **entire ancestor
+  chain** at full text" — is unbuildable, and `HierarchicalDecay` ("span full +
+  parent full + **older ancestors summarized**") has no older ancestors left to
+  summarize, so it becomes byte-identical to full inheritance and §7 would be
+  comparing five strategies of which three are secretly one. Compounding it,
+  message-as-node means one exchange is *two* rows, so three ancestors is one
+  and a half exchanges of history.
+  The three numbers are now named separately: the CTE climbs to the root
+  (runaway guard 200); the *strategy* decides how many ancestors reach the
+  prompt; the *decay function* decides how many arrive at full fidelity, and
+  that is where the `~3` lives. Depth is cheap because the recursion carries
+  only `(edge_id, message_id, depth)` — content and anchors are joined out once
+  at the end — so distant ancestors are expensive in *tokens*, not query time,
+  which is the decay function's problem and not the walk's.
+
+- **Strategy resolution never crosses a branch boundary.** §5 ("branches
+  default to SpanOnly at creation") and §6 ("null override → keep walking →
+  conversation default") pointed different ways for the commonest case of all:
+  an anchored edge with a null override, which is what B1 writes when the
+  client sends none. The reconciliation is in §6's own table, which permits
+  null "on continuations **and on branches that accept the default**" — so null
+  on a branch means something, and §5 says what it means. The rule:
+  | Situation | Answer | `source` |
+  |---|---|---|
+  | no parent edge (root) | conversation default | `conversation_default` |
+  | own parent edge anchored, override null | **SpanOnly** | `branch_default` |
+  | nearest usable non-null override | that override | `edge` |
+  | branch boundary, nothing usable | conversation default | `branch_boundary` |
+  | root reached, no hit | conversation default | `conversation_default` |
+  | safety cap fired | conversation default | `depth_cap` |
+  "Usable" excludes exactly one value: `SpanOnly` seen from below, since §5
+  locks it "valid on branches only" and a continuation two levels inside a
+  SpanOnly branch resolving to it would compose the branch's span and drop
+  everything typed in the branch since.
+  Three consequences, all wanted: a branch is a deliberate context reset, so a
+  trunk override should not reach across it (conversation-wide intent already
+  lives in `default_strategy`); §6's "nested branches govern their own subtree"
+  still holds, because an *explicit* override on a branch edge is inherited
+  downward; and the walk is bounded by the distance to the nearest branch, so
+  the only deep walk is in a conversation with no branches at all.
+  It also needs no special case in SQL — the recursion continues only while the
+  row just found was a continuation carrying no override, and app code reads
+  whatever it stopped on.
+
+- **The other five §8.13 decisions.** Resolution returns a `source` rather than
+  a bare strategy (four of five outcomes answer with the conversation default,
+  so tests can assert *why*, `depth_cap` and `branch_boundary` are visible per
+  §8.6, and `Generation.strategy_used` plus the §8.9 navigator both want it) ·
+  the walk returns ancestors only, nearest first, each with the edge below it ·
+  the conversation filter lives **inside** the CTE, in both halves, because
+  filtering afterwards would already have climbed through a foreign message ·
+  the walk takes an already-owned `Conversation`, never a bare message id, so
+  the §8.11 ownership choke point cannot be bypassed, and a message outside it
+  is a 404 · `strategy_override` on a *continuation* edge stays permitted
+  (§6 describes intent and nothing enforces it; forbidding it costs a CHECK, a
+  migration and an autogenerate review to remove something §7's eval harness
+  plausibly wants, and `PATCH /conversations/{id}` with a new
+  `default_strategy` is already the user-facing "compose everything from here
+  on this way" control). A per-message override in the UI went to §12 as an
+  open item: an override a user can set but cannot see is worse than none.
+
+- **A deadlock, on code that was correct.** Two `pytest` processes shared one
+  `dendrite_test`, and the `session` fixture's per-test `TRUNCATE` takes ACCESS
+  EXCLUSIVE on every table — so one run truncated while the other held row
+  locks and Postgres killed a transaction. The *knock-on* failures were the
+  dangerous part, because they read as application bugs: a truncate landing
+  mid-test wipes the signed-up fixture user, so `response.json()["message"]`
+  raises `KeyError`, and two runs signing up the same fixture email collide on
+  `UniqueViolation`. Reproduced deliberately (55 failed / 58 failed
+  concurrently), then fixed: each run builds `dendrite_test_<pid>` and drops it
+  on the way out, sweeping up databases left by killed runs — only ones with no
+  active connections, so a live run is never touched. Verified at 103 passed /
+  103 passed concurrently. Promoted to a standing gotcha, mainly so the
+  `KeyError` signature is written down.
+
+- **The wrong join hangs rather than fails.** Deliberately swapping
+  `child_message_id` for `parent_message_id` in the recursive step: the walk
+  goes *down* the tree, and since the match is no longer on the unique column,
+  breadth fans out and 200 levels of fan-out is a combinatorial explosion. The
+  safety cap bounds depth, not breadth. Worth knowing as a symptom — a hanging
+  `pytest` on the B2 tests means those two columns are swapped. Also confirms
+  the fork tests earn their place: that version is *perfect* on a straight-line
+  chain.
+
+- **Bugs in hand-typed code: two, both spelling.** `messsage: Message` in the
+  `AncestorStep` dataclass (Python's error named it: *"unexpected keyword
+  argument 'message'. Did you mean 'messsage'?"*), and `StrategyReolution` in
+  three of four places — consistently enough that `fallback()` worked and only
+  the two tests reaching the correctly-spelled call failed with `NameError`.
+  Down from nine last session.
+
+- **`StrategySource` moved** from `app/services/ancestors.py` to
+  `app/models/_shared.py`, beside `AnyStrategy`: `app/schemas/ancestors.py`
+  needs it, and a schema importing from a service is backwards. Graph builders
+  moved out of `tests/test_ancestor_walk.py` into `tests/graph_builders.py`,
+  shared with the resolution tests.
+
+- **What was deliberately not built.** No path enumeration, no closure table,
+  no `depth_from_root` — §8.4 forbids all three pre-emptively and the existing
+  unique index on `edge.child_message_id` does every level in one lookup. No
+  cycle detector either (§13's speculative-infrastructure line); the trigger is
+  a real `truncated=True` at 200. And no `EXPLAIN` check: on five-row test
+  tables Postgres picks a sequential scan regardless of what indexes exist, so
+  the plan would prove nothing until there is real data.
+
+- **Next: Layer C (generation).** The `LLMClient` protocol and its
+  `FakeLLMClient` (§8.8), the five strategy implementations and the swappable
+  decay function (§5), SSE streaming, and §12's `Message.updated_at`-under-
+  streaming open item, whose trigger is precisely this layer. Frontend slice 3
+  (linear chat, conversation list into a persistent sidebar) is blocked on it.

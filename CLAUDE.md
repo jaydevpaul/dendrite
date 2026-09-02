@@ -38,23 +38,24 @@ populated → branch, null → continuation; regeneration never deletes.
 - A frontend slice may not begin before the backend capability it renders
   exists (decision record §8.10).
 
-## Current state (2026-09-01)
+## Current state (2026-09-02)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
 conversation routes (`POST|GET /conversations`, `GET|PATCH
 /conversations/{id}`) · message + edge write layer (`POST|GET
-/conversations/{id}/messages`) · 103 backend tests · frontend slices 1 and 2
-(landing, signup/login, route guards, theme toggle, conversation list +
-create + detail with rename) verified end to end through the Vite proxy.
+/conversations/{id}/messages`) · **the §8.4 ancestor walk and strategy
+resolution by walk-up** (`app/services/ancestors.py`, `GET
+/conversations/{id}/messages/{message_id}/ancestors`) · 155 backend tests ·
+frontend slices 1 and 2 (landing, signup/login, route guards, theme toggle,
+conversation list + create + detail with rename) verified end to end through
+the Vite proxy.
 
-**Not built:** the §8.4 ancestor walk, strategy resolution by walk-up,
-generation, summarization, embeddings, eval framework, the graph navigator.
+**Not built:** generation (Layer C), summarization, embeddings, the strategy
+interface and its five implementations, the decay function, eval framework,
+the graph navigator.
 
-Committed through frontend slice 2 (`b7351af`, which also carries the
-`70ccde22e86d` index migration). **Backend B1 is uncommitted** — `app/main.py`
-plus `app/{schemas,services}/message.py`, `app/api/routes/messages.py` and
-`tests/test_message_routes.py`, along with this session's doc updates.
+Everything is committed, through `b97258d`. The working tree is clean.
 
 ### Running it
 
@@ -113,6 +114,19 @@ there silently re-breaks the connection.
   you own.** `Message.conversation_id == Conversation.id` typechecks, runs, and
   is a tautology every row satisfies — it silently deletes the ownership guard
   and adds a cross join. This exact typo shipped once in B1.
+- **The two ancestor walks are the same query with different stop rules**, and
+  both live in `app/services/ancestors.py`. `walk_ancestors` climbs to the
+  root; `resolve_strategy` stops at the first override *or* the first branch
+  edge. Both filter `message.conversation_id` **inside** the CTE, in the seed
+  *and* the recursive step — filtering after the walk is too late, because by
+  then it has already climbed through a foreign message into whatever is above
+  it. §8.4's "~3" is a *fidelity* tier, not a query bound; the walk goes to the
+  root and 200 is a runaway guard (§8.13).
+- **A recursive step joined on `parent_message_id` walks *down* the tree and
+  hangs.** It behaves perfectly on a straight-line chain, so only a fork
+  catches it — and it does not fail cleanly: matching on the non-unique column
+  fans out, and 200 levels of fan-out is a combinatorial explosion. A `pytest`
+  run that *hangs* on the B2 tests means those two columns are swapped.
 - **The test database is per-pytest-process** (`dendrite_test_<pid>`, created and
   dropped by the `engine` fixture). Do not go back to one shared name. Two runs
   against one database deadlock — the per-test `TRUNCATE` takes ACCESS EXCLUSIVE
@@ -135,19 +149,28 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Backend B2 — the §8.4 ancestor walk.** A recursive CTE stepping up via
-`edge.child_message_id`, plus **strategy resolution by walk-up** (§6: take the
-message's parent edge; non-null `strategy_override` wins; else step to that
-edge's parent and repeat; reach the root with no hit → `Conversation.
-default_strategy`). §8.4 bounds the walk at ~depth 3 and forbids path
-enumeration or a closure table pre-emptively. The write layer it reads (B1) is
-built and tested.
+**Layer C — generation.** The walk it reads (B2) is built and tested, and
+frontend slice 3 is blocked on it. Three things it needs before any route:
 
-After that, **frontend slice 3 — linear chat**, which is blocked on generation
-(Layer C). Slice 3 also **moves the conversation list into a persistent left
-sidebar**: the app should read like ChatGPT/Claude, with familiar linear chat
-as the main surface and branching as the layer on top. Today's separate list
-page is the less familiar shape; the API layer, hooks and rows carry over.
+- The **`LLMClient` protocol** (`generate` + `embed`) from §8.8, with one
+  concrete implementation and a **`FakeLLMClient`** — the fake is what lets
+  context composition be tested without network calls or spend.
+- The **strategy interface** and its five implementations (§5), since
+  `resolve_strategy` now answers *which* one to run but nothing implements
+  them. `HierarchicalDecay` also needs the **decay function** behind its own
+  interface (§5 locks it swappable) — and that is where §8.4's `~3` full-
+  fidelity tier actually lives (§8.13).
+- A decision on **`Message.updated_at` under streaming** — §12's open item,
+  whose trigger is exactly this layer. Current lean recorded there: buffer the
+  stream and write `content` once at completion.
+
+Streaming is SSE via `StreamingResponse`, not websockets (§8.8).
+
+After that, **frontend slice 3 — linear chat**. Slice 3 also **moves the
+conversation list into a persistent left sidebar**: the app should read like
+ChatGPT/Claude, with familiar linear chat as the main surface and branching as
+the layer on top. Today's separate list page is the less familiar shape; the
+API layer, hooks and rows carry over.
 
 ## Progress log
 
@@ -157,21 +180,38 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-01**: Frontend slice 2 (conversation list) and backend B1 (message
-  + edge write layer) built; tests 69 → 103. Six spec-silent questions settled
-  first — nested `/conversations/{id}/messages`, one POST writing message *and*
-  edge in one transaction, anchor validated against the parent's real text,
-  parent must share the conversation (a plain FK otherwise lets you attach to a
-  stranger's message), a second parentless message → 409, and no
-  role-alternation rule. `root_message_id` is claimed by a conditional
-  `UPDATE ... WHERE root_message_id IS NULL` so two concurrent first messages
-  cannot both win. `conversation.updated_at` now moves on every message write,
-  for the slice-3 sidebar's activity ordering. `GET .../messages` returns two
-  flat lists (messages + edges), not a nested tree. Nine bugs found in
-  hand-typed code, one a live security hole (`Conversation.id` for
-  `conversation.id`); one bug was mine (`conversation.id` read after
-  `session.rollback()` → `MissingGreenlet`). All six LOCKED-adjacent decisions
-  are now written into the decision record as **§8.12**, with pointer notes on
-  the three §9 rows they touch.
+- **2026-09-02**: **Backend B2 built** — the §8.4 ancestor walk, strategy
+  resolution by walk-up, and a read endpoint; tests 103 → 155, in four commits
+  (`34931ed`, `223012e`, `98a5ac6`, `b97258d`). Seven spec-silent or
+  spec-conflicting questions settled before typing, all written into the
+  decision record as **§8.13** with pointer notes on §5, §6, §8.4, §9 and a new
+  §12 open item.
+  Two findings mattered more than the code. **§8.4's "~3" is a fidelity tier,
+  not a bound on the walk** — read as a query cap it makes `FullInheritance`
+  ("the entire ancestor chain") unbuildable and collapses `HierarchicalDecay`
+  into it, since nothing older would be left to summarize; the walk now climbs
+  to the root with 200 as a runaway guard. And **strategy resolution never
+  crosses a branch boundary**, which reconciles §5's "branches default to
+  SpanOnly" with §6's walk-up: §6's own table permits null "on branches that
+  accept the default", so null on a branch *means* SpanOnly while null on a
+  continuation means keep climbing. `SpanOnly` is the one value never inherited
+  downward (§5 locks it branch-only). Resolution returns a `source`
+  (`edge` | `branch_default` | `branch_boundary` | `conversation_default` |
+  `depth_cap`), because four of five outcomes answer with the conversation
+  default and a test asserting only the strategy would pass for a right answer
+  reached down the wrong path.
+  **A deadlock cost a debugging round, on correct code.** Two `pytest` runs
+  shared one `dendrite_test`, and the per-test `TRUNCATE` takes ACCESS
+  EXCLUSIVE on every table; the knock-on failures were the misleading part —
+  a truncate landing mid-test wipes the fixture user, so
+  `response.json()["message"]` raises `KeyError` and reads as a bug in
+  `create_message`. Each run now builds `dendrite_test_<pid>`.
+  Only two bugs in hand-typed code this time, both spelling (`messsage`,
+  `StrategyReolution`) — Python named both in the error text. `StrategySource`
+  moved to `app/models/_shared.py` so the response schema stops importing from
+  a service.
+  **Next: Layer C (generation)** — the `LLMClient` protocol and its fake, the
+  five strategy implementations, the decay function, and §12's
+  `Message.updated_at`-under-streaming decision, whose trigger is this layer.
   **Next: backend B2** — the §8.4 recursive-CTE ancestor walk and strategy
   resolution by walk-up.
