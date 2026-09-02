@@ -113,6 +113,15 @@ there silently re-breaks the connection.
   you own.** `Message.conversation_id == Conversation.id` typechecks, runs, and
   is a tautology every row satisfies — it silently deletes the ownership guard
   and adds a cross join. This exact typo shipped once in B1.
+- **The test database is per-pytest-process** (`dendrite_test_<pid>`, created and
+  dropped by the `engine` fixture). Do not go back to one shared name. Two runs
+  against one database deadlock — the per-test `TRUNCATE` takes ACCESS EXCLUSIVE
+  on every table while the other run holds row locks — and the *knock-on*
+  failures are the dangerous part, because they read as application bugs: a
+  truncate landing mid-test wipes the signed-up fixture user, so
+  `response.json()["message"]` raises `KeyError`, and two runs signing up the
+  same fixture email collide on `UniqueViolation`. Cost one debugging round on
+  2026-09-02, on code that was correct.
 - Do not pipe a backgrounded dev server through `tail` — it buffers and the log
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
