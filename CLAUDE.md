@@ -59,8 +59,7 @@ the graph navigator.
 (D1–D12).** Do not re-litigate them. `tests/test_llm_fake.py` is already written
 and waiting for C1's code.
 
-Committed through `a0eba33`. Uncommitted: §8.15 in the decision record, two
-`ROADMAP.md` corrections, and `tests/test_llm_fake.py`.
+Everything is committed, through `9c3108b`. The working tree is clean.
 
 ### Running it
 
