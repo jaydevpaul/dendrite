@@ -133,7 +133,10 @@ evaluation possible without code changes.
 **Decay function is swappable.** `HierarchicalDecay` is a family, not one fixed
 algorithm — the decay function (the rule setting how fidelity drops per ancestor
 level: linear, exponential, custom) lives behind its own interface and can be
-swapped without rewriting the strategy.
+swapped without rewriting the strategy. **The interface signature and the one
+MVP implementation (`TieredDecay(full_depth=3)`) are in 8.15 D5** — it takes the
+whole chain, not a bare depth, because "exponential" and "custom" cannot be
+expressed otherwise.
 
 ### Strategy selection (what is actually decided)
 
@@ -881,8 +884,333 @@ arrangement that is fine when written and wrong six months later.
 INSERT means a `GET .../messages` firing mid-stream returns a message whose
 `content` is `''`. That is correct and intended, but a client cannot tell it
 apart from a message that is genuinely empty. **What the graph shows about an
-in-flight generation is a separate decision and is not taken here** — see
-section 12.
+in-flight generation is a separate decision and is not taken here** — resolved
+2026-09-03, see 8.15 D1.
+
+---
+
+### 8.15 Layer C decisions — generation, composition and the LLM client (decided 2026-09-03)
+
+Decided ahead of the Layer C build, the way 8.13 was decided ahead of B2 and
+8.14 ahead of the streaming write. Twelve items: one resolves section 12's open
+item on in-flight generations, one corrects a supporting claim in 8.14, and ten
+are shape decisions the spec is silent on.
+
+**D1 — An in-flight generation is derived from blank content, not stored.**
+`MessageOut` gains a computed `pending: bool` — `role == "assistant" and
+content == ""`. No column, no migration.
+
+This is safe only because of 8.12, which narrowed the API to refuse empty
+`content` (`min_length=1` after stripping). A blank *assistant* row therefore
+cannot be created by any client; the generation route's blank INSERT is the only
+thing in the system that produces one, so blankness already *means* "a
+generation happened here".
+
+Section 12's other two candidates both fail. Deriving "generating" from a
+missing `Generation` row contradicts 8.12 — a missing row means **not
+generated** (hand-authored fixtures, which section 7's eval depends on), so every
+fixture assistant message would render as forever-generating. Hiding the row
+until it has text breaks 8.12's "every node and every link as two flat lists":
+the edge would have to be hidden with it, so the client's parent→children map
+would point at a message absent from the list, and the streaming tab's own reply
+would vanish on refresh.
+
+A `status` column was rejected as a migration against LOCKED section 9 for
+something derivable — and it does not fix the staleness case that is its main
+argument. A process that dies between the blank INSERT and the completion UPDATE
+runs no exception handler, so the column sits at `'generating'` forever exactly
+as a blank row does.
+
+*Accepted cost:* an abandoned generation reads `pending` forever. D9 makes this
+recoverable without a column — a failed generation **has** a `Generation` row
+while an in-flight one does not, so combined with `content == ''` the three
+states separate with one extra query.
+
+**D2 — The generate route takes an existing user message id.**
+`POST /conversations/{id}/messages/{message_id}/generate`, where `message_id` is
+the **user** message being replied to. Nested under the existing `/conversations`
+prefix, so no new Vite proxy entry.
+
+8.12's "one request writes the message and its edge" argument does not extend
+here. A message with no edge is *unreachable*; a user message with no reply is a
+legal, visible state — an unanswered question with a retry affordance, which is
+needed anyway because generation can fail on its own.
+
+The decisive reason is section 6's "many Generations per user message".
+Regeneration and section 7's five-strategies-against-one-message both must name
+an *existing* id, so this route has to exist regardless; a second route accepting
+raw text would duplicate it.
+
+*Consequence for the frontend:* the stream comes back from a `POST`, so the
+browser's `EventSource` (GET only) cannot be used — read it with `fetch()` and a
+`ReadableStream` reader.
+
+Also ruled out: splitting trigger from stream (`POST` returns 202, a separate
+`GET` streams) so that `EventSource` would work. The server would then have to
+hold the in-progress stream somewhere both requests can reach, which breaks
+silently the moment there is more than one worker process.
+
+**D3 — The composed prompt replays ancestors as real multi-turn messages.**
+Not one envelope holding the transcript as text. Two rules make it work:
+
+- A **summarized ancestor keeps its original role**, with its content prefixed
+  `[summarised]`. A summary of what a participant said is honestly attributed to
+  that participant, so no role is invented.
+- If the oldest verbatim turn would be an **assistant** turn, prepend
+  `{"role": "user", "content": "(earlier in the conversation)"}`. `messages[0]`
+  must be a user message on every current provider. This fires only for
+  `ParentOnly` on a branch — `FullInheritance` and `HierarchicalDecay` both climb
+  to the root, and the root is a user message.
+
+The rejected alternative was a uniform envelope: a `system` preamble plus a
+single `user` message holding the whole transcript as text, identical in shape
+across all five arms. It has no special cases and is trivially diffable in tests.
+Multi-turn won on three counts: it is the format these models are trained on; it
+makes `FullInheritance` a genuinely *naive* baseline ("resend the conversation"),
+which is what section 5 asks of it; and it caches far better. Cache hits require
+a byte-identical prefix and breakpoints sit on content blocks, so separate
+ancestor turns form a stable prefix that grows at the end, while one combined
+string is invalidated whole by every new message — and section 7 runs 375
+generations per eval run, most of them resending a chain.
+
+*Checked, because it would have killed this:* 8.12 deliberately declined a
+role-alternation rule, so a user message may legally have a user parent.
+Consecutive same-role messages are accepted and merged by the provider APIs, so
+non-alternating chains compose correctly.
+
+`composed_context` stores the whole payload as JSON — `{"system": ...,
+"messages": [...]}` — so a past generation is replayable, which is what section
+9's "exact context sent to the LLM" requires. A rendered prose blob is not.
+
+**D4 — The anchored span appears in all five strategies, not only `SpanOnly`.**
+Section 5's table describes which *ancestors* each strategy sends and says
+nothing about the user's own question. The span is part of what the user asked —
+the referent of the pronoun in "what does *that* cost me?" — so withholding it
+from four arms would have them answering a vaguer question than `SpanOnly`
+answers, and `SpanOnly` would win on branches for a reason unrelated to context
+composition.
+
+Held constant across arms: the question **and** the highlight. Varying: the
+ancestors. Continuations have no anchor, so their final turn is the question
+alone — no special case.
+
+**D5 — The decay function takes the whole chain, and has no drop tier.**
+Interface: `assign(steps) -> list[Fidelity]`, one entry per step — not
+`fidelity_for(depth)`.
+
+Section 5 names "linear, exponential, custom" as the swappable family. An
+exponential decay over a *fraction* of the chain needs the chain's length, and a
+token-budget decay needs message lengths; a single `depth` argument can supply
+neither. The narrow signature would have to be widened by the first swap,
+breaking a promise section 5 locks.
+
+One implementation: **`TieredDecay(full_depth=3)`** — depth ≤ 3 full, deeper
+summarized. This class is the only place 8.4's `~3` lives (8.13). Depth-based
+rather than token-budget-based, so the composed context does not depend on
+message lengths — which keeps eval runs comparable across conversations and tests
+deterministic. The budget variant stays buildable behind the same interface.
+
+**No drop tier.** Section 5 says older ancestors are *summarized*, not dropped.
+Dropping would make decay differ from `FullInheritance` in **coverage** as well
+as fidelity, so a token saving could no longer be attributed to summarization. A
+`TruncatingDecay` is a later implementation behind the same interface, which is
+what the interface is for.
+
+**D6 — Retrieval promotes summarized ancestors back to full text, in place.**
+The strategy runs decay first, then re-marks some steps decay marked `summary`
+back to `full`. Retrieval only ever considers already-summarized steps, so on a
+chain short enough that nothing was summarized it does nothing, and it can never
+undo the full-fidelity tier.
+
+Promotion in place rather than appending a separate "relevant excerpts" block:
+appending sends the same message **twice** — abbreviated in position, and again
+in full out of order — which is waste measured directly by the quality-per-token
+metric.
+
+Message-level granularity is not a choice. Section 9's `MessageEmbedding` stores
+one vector per message, so there are no chunks to retrieve.
+
+**How many are promoted is a fraction of the summarized count, not a fixed k:**
+
+```
+promote_count = min(ceil(fraction * n_summarized), max_promotions)
+fraction = 1/3      max_promotions = 10
+```
+
+A fixed `k` collapses the arm. With `full_depth = 3`, a chain of depth *D* has
+*D − 3* summarized ancestors, so `k = 10` promotes **all** of them on any chain
+shallower than depth 13 — six exchanges under message-as-node — and
+`HierarchicalDecayWithRetrieval` becomes byte-identical to `FullInheritance` on
+most of section 7's fixtures, reducing five baselines to four. The fraction makes
+that structurally impossible: two thirds of the summaries always survive. `ceil`
+rather than `floor`, so a short chain promotes one rather than zero and the arm
+never silently degenerates into plain decay. `max_promotions` is a runaway guard
+in the sense of `WALK_SAFETY_CAP`, not a working setting — the walk reaches depth
+200, where a third would be 66 full messages.
+
+The query is scoped by the walk's ancestor ids **and** filtered on `model_used` —
+both of 8.2's named failure modes in one `WHERE`. Without the ancestor scope the
+search would reach sibling branches, which is precisely the context the user
+branched away from. The query text is the user's message plus the anchored span,
+and that `embed` call is the only network call in compose, so it is where 8.6's
+timeout and fallback live.
+
+No similarity threshold in MVP: any value would be a guess, and section 7 is what
+produces the data to pick one. `fraction` and `max_promotions` are constructor
+args so the harness can sweep them.
+
+**D7 — `strategy_used` records what ran; degradations are not persisted.**
+When 8.6's fallback fires, `Generation.strategy_used` is `HierarchicalDecay`, not
+`HierarchicalDecayWithRetrieval`. Section 6 already calls the column "the
+historical record of what actually ran", against `default_strategy` and
+`strategy_override` which are intent.
+
+No new column for the degradation list — and under this rule none is needed,
+because degradation is already derivable. The eval harness knows which arm it
+asked for and the database records what ran, so a disagreement between the two
+*is* a degraded run. "Arm 5 degraded in 40% of runs" — a material finding for
+section 7's report, and one that could never be recovered retroactively — is
+computable from data already stored.
+
+That works only because of the rule above. Recording *intent* would make a
+degraded run indistinguishable from a clean one and force the column.
+
+The degradation list lives in the in-memory compose result, goes out on the SSE
+`done` event, and is logged. 8.13's `source` is handled the same way.
+
+**D8 — The completion write sets `updated_at` explicitly. (Refines 8.14.)**
+`message.updated_at = message.created_at`, in the same UPDATE that writes
+`content`. An explicit value wins over `onupdate`, which only supplies a default
+when the column is absent from the SET clause.
+
+8.14 states that section 9's "(moves only on edit)" stays true as written under
+buffer-and-write-once. It does not, quite: the model carries
+`onupdate=func.now()`, which fires on the completion UPDATE too, so every
+generated message would end up with `updated_at > created_at` having never been
+edited. This does not reopen 8.14 — buffering and writing once stands — it adds
+the one assignment that makes its claim true.
+
+What it buys: `updated_at != created_at` becomes a trustworthy "this was edited"
+signal, which matters because section 6 ties **anchor repair** to edits
+specifically. Without it, an edited message and a generated one are
+indistinguishable, permanently.
+
+**D9 — Two transactions, and a failed generation still writes its `Generation`
+row.**
+
+```
+compose (reads only)                                    ~1-2s, 8.6
+INSERT blank assistant message + edge   -> COMMIT       D1 needs this visible
+... stream, buffered in memory, no DB work ...
+UPDATE content + updated_at
+INSERT generation                       -> COMMIT       one transaction, 8.14
+```
+
+Two, not one: a single transaction would sit `idle in transaction` for the length
+of the stream, and a handful of concurrent generations would drain the connection
+pool. The early commit is also what makes D1 observable — an uncommitted row is
+invisible to other connections, so without it no second tab ever sees `pending`.
+
+The completion write uses a session opened from `async_session_factory`, **not**
+the request's `SessionDep`. The stream body runs inside the `StreamingResponse`
+generator, after the handler has returned, and whether a `yield`-dependency
+session is still usable there depends on framework teardown ordering — not
+something to depend on.
+
+A failure writes the `Generation` row with **null** token counts and leaves
+`content = ''`. Section 7 already anticipates these rows ("failed Generations
+have null token counts — the harness must filter them out"), and it preserves
+`composed_context`, the only surviving record of what was attempted. Deleting the
+blank row was rejected: section 6 locks that regeneration never deletes, the edge
+would have to go too, and the evidence would be destroyed.
+
+**D10 — The SSE protocol is four named events, with JSON data throughout.**
+
+| event | data |
+|---|---|
+| `start` | `assistant_message_id`, `strategy`, `source`, `model` |
+| `chunk` | `text` |
+| `done` | `generation_id`, `input_tokens`, `output_tokens`, `degradations` |
+| `error` | `detail` |
+
+`start` carries the assistant message id because the client needs it before any
+token arrives, and the strategy plus 8.13's `source` because 8.9's navigator
+wants "why did this message get this strategy".
+
+Chunk text is **JSON-encoded, not raw**. SSE frames are newline-delimited, so a
+bare newline inside `data:` ends the frame — and model output is full of them.
+The failure would present as the model producing broken markdown.
+
+**Compose runs before the `StreamingResponse` is returned.** Once it is returned
+the headers are on the wire with a `200` and nothing can become a 404 or 422, so
+resolution, the walk and composition all happen first. The `error` event is
+reserved for genuine mid-stream failures.
+
+**D11 — One concrete client, OpenAI, with model ids in config.**
+`generate`: `gpt-5.6-luna` at `effort: "low"`. `embed`:
+`text-embedding-3-small` (section 9's lock). Section 7's judge: `gpt-5.6-terra`.
+
+Section 9 locks the embedding model, which is OpenAI's, and Anthropic has no
+embeddings endpoint — so the vendor question was only ever about generation.
+Choosing OpenAI for both makes 8.8's "a single concrete implementation" literal:
+one SDK, one key, one set of error types.
+
+Cost, verified 2026-09-03, for one eval run of 375 generations at ~1,500 tokens
+in and out: **$0.79 generation + $1.80 judge on OpenAI**, against **$8.78 and
+$5.37** for `claude-sonnet-5` and `claude-opus-5` (both of which carry a newer
+tokenizer producing ~30% more tokens for identical text). Across five runs plus
+manual testing that is ~$13 against ~$75. The **marginal** figure decided it:
+$2.59 per additional eval run against $14.15 means the eval gets re-run whenever a
+prompt or a decay parameter changes, rather than rationed — and a number measured
+once is a number you end up defending rather than trusting.
+
+Quality risk is recoverable rather than absorbed: Luna's `effort` dial runs `none`
+through `max` on the same model id, so weak replies are a config change, not a
+migration. If section 7's absolute scores disappoint across *all five* arms, that
+is the signal to swap the client — which the protocol makes an env change.
+
+**Thinking stays on, held constant across all five arms.** Turning it off was
+considered and rejected. Thinking tokens are billed as output and scale with input
+size, but that is the *treatment's effect*, not a confound — decay's real saving
+is fewer input tokens **and** less thinking on top, and section 7's "total tokens
+(in+out)" is written to capture exactly that. Excluding them would understate the
+thesis. Three consequences: thinking length varies run to run, so each scenario ×
+strategy cell is run three times and averaged (hence 375 generations per run);
+thinking tokens cannot be separated from answer tokens, since providers bill them
+inside `output_tokens` and expose no split — which is also why no column is
+needed; and with reasoning hidden there is a pause between `start` and the first
+`chunk`, which the UI renders as a thinking indicator.
+
+Explicitly **not** a provider registry (section 13): `base_url` and `model` are
+config values, with no routing logic and no per-request vendor choice.
+
+**D12 — `generate` yields typed events; token counts come from the provider.**
+The stream yields `TextDelta` zero or more times and finishes with exactly one
+`Completed(text, input_tokens, output_tokens, model)`.
+
+The problem it solves: usage numbers only arrive after the last chunk, and a
+Python async generator cannot return a value the `for` loop sees. The
+alternatives were a result object with a mutable `usage` field the caller reads
+*after* iterating — which works but leaves an ordering rule nothing enforces —
+and yielding bare strings while counting tokens locally.
+
+Typed events won on three counts: they map 1:1 onto D10's SSE events
+(`TextDelta` → `chunk`, `Completed` → `done`), so the route is a translation loop
+with no bookkeeping of its own; there is no mutable state and no ordering rule to
+remember, because the type says what you have; and `FakeLLMClient` can script the
+sequence exactly, including a failure partway through, which is what tests D9's
+failure path.
+
+**Token counts come from the provider's own `usage`, never a local tokenizer.**
+Those are the billed numbers — which is what section 7's quality-per-token should
+measure — and they already include the thinking tokens D11 decided to count. A
+local tokenizer would add a dependency and drift from the invoice. Both fields
+are nullable because a stream can die before usage is reported, which is exactly
+the case D9 writes as a null-token `Generation` row.
+
+*Logged, not built:* prompt caching for the composed prefix. `FullInheritance`
+resends the entire chain every turn, so it is the obvious cost win — but section
+13 says ROADMAP.md until measured.
 
 ---
 
@@ -915,9 +1243,9 @@ Global rules:
 | id | uuid | PK (v7) |
 | conversation_id | uuid | FK → Conversation, NOT NULL |
 | role | text | NOT NULL, CHECK (role IN ('user','assistant')) |
-| content | text | NOT NULL, empty string allowed (streaming starts blank; **the API refuses it — see 8.12**) |
+| content | text | NOT NULL, empty string allowed (streaming starts blank; **the API refuses it — see 8.12**; blank + `role='assistant'` is what `MessageOut.pending` derives from — **see 8.15 D1**) |
 | created_at | timestamptz | NOT NULL, default now() |
-| updated_at | timestamptz | NOT NULL, default now() (moves only on edit — stays true under streaming because the stream is buffered and written once; **see 8.14**) |
+| updated_at | timestamptz | NOT NULL, default now() (moves only on edit — the stream is buffered and written once (**8.14**), and that one completion write sets this column explicitly to `created_at` so the annotation is literally true (**8.15 D8**)) |
 
 ### Edge
 | Column | Type | Notes |
@@ -946,9 +1274,9 @@ CHECK (strategy_override <> 'SpanOnly' OR anchor_start IS NOT NULL)     -- SpanO
 | id | uuid | PK (v7) |
 | user_message_id | uuid | FK → Message, NOT NULL |
 | assistant_message_id | uuid | FK → Message, NOT NULL, **UNIQUE** (one generation per assistant msg) |
-| strategy_used | text | NOT NULL, CHECK in the 5 strategies |
+| strategy_used | text | NOT NULL, CHECK in the 5 strategies (what actually ran, so an 8.6 fallback records the degraded strategy — **see 8.15 D7**) |
 | model_used | text | NOT NULL |
-| composed_context | text | NOT NULL (exact context sent to the LLM — reproducibility) |
+| composed_context | text | NOT NULL (exact context sent to the LLM — reproducibility; stored as the JSON payload `{"system": ..., "messages": [...]}`, not rendered prose, or it cannot be replayed — **see 8.15 D3**) |
 | input_tokens | integer | NULLABLE (null if generation failed pre-count) |
 | output_tokens | integer | NULLABLE |
 | created_at | timestamptz | NOT NULL, default now() |
@@ -1143,20 +1471,16 @@ erDiagram
 
 Each is pinned to either a milestone or a trigger condition — none is floating.
 
-- **What the graph shows about an in-flight generation.** Section 8.14 buffers
+- ~~**What the graph shows about an in-flight generation.** Section 8.14 buffers
   the stream and writes `content` once at completion, which leaves a blank
   message row visible for the duration — correct, but indistinguishable from a
   genuinely empty message to any client reading `GET .../messages`. The
   candidates are a `status` column on Message, deriving "generating" from the
   absence of a completed `Generation` row, or keeping the row out of the graph
-  response until it has text. Not decided now because it depends on what the
-  streaming endpoint actually returns to the client, and on whether a second
-  browser tab is expected to *know* a generation is running. Note that it
-  cannot see the text either way: under 8.14 the partial reply exists only in
-  server memory and in the SSE stream of the tab that asked for it, so a second
-  tab reads `content = ''` from the database and nothing else. The question is
-  whether that row should be marked as in-flight or hidden until it has text.
-  *Trigger: the first generation route.*
+  response until it has text.~~ **RESOLVED 2026-09-03** → derived, not stored:
+  `MessageOut.pending` is computed as `role == "assistant" and content == ""`,
+  which 8.12's refusal of empty `content` at the API makes unambiguous. No
+  column; section 8.15 D1 records why the other two candidates fail.
 - ~~**`Message.updated_at` semantics under streaming.** Section 9 annotates the
   column "(moves only on edit)" while the model carries `onupdate=func.now()`,
   which fires on any UPDATE — so persisting a stream chunk by chunk would make
@@ -1173,7 +1497,10 @@ Each is pinned to either a milestone or a trigger condition — none is floating
 - **"Current summary" selection rule** in code (when a message has several
   summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*
 - **Full failure-mode list** for each context-composition step + its fallback —
-  *trigger: near the strategy-interface implementation, Weeks 7–14.*
+  partly answered by 8.15 (D6 fixes the retrieval timeout and its fallback, D7
+  fixes how a degradation is recorded and recovered), so what remains is the
+  summarization and embedding-write paths in Layer D. *Trigger: near the
+  strategy-interface implementation, Weeks 7–14.*
 - **`User.display_name`** (nullable text) — deliberately NOT added with auth:
   nothing renders a user name yet, and a nullable column is equally cheap to
   add later. `username` was considered and rejected outright — a public handle

@@ -36,11 +36,17 @@ once it stops fitting.
    conversations and `HierarchicalDecay` on long ones, so a short test
    conversation would measure the former under the latter's name.
 
-**Why the premise may not even bind.** Context composition walks the *ancestor
-path*, not the whole DAG, and section 8.4 bounds that walk at roughly depth 3.
-The composed context is already small, so at MVP scale `AdaptiveBudget` would
-resolve to `FullInheritance` nearly every time — shipping the naive baseline as
-the product default.
+**~~Why the premise may not even bind.~~ Corrected 2026-09-02 — this paragraph
+read: "Context composition walks the *ancestor path*, not the whole DAG, and
+section 8.4 bounds that walk at roughly depth 3. The composed context is already
+small, so at MVP scale `AdaptiveBudget` would resolve to `FullInheritance` nearly
+every time."** Section 8.13 established that 8.4's `~3` is a *fidelity tier*, not
+a bound on the walk — composition climbs to the root, with 200 as a runaway
+guard. So the composed context is **not** already small, and this argument
+against `AdaptiveBudget` no longer holds. The three arguments above are
+unaffected; argument 3 in particular gets stronger, since a deep walk makes the
+`FullInheritance`/`HierarchicalDecay` blur depend on conversation length rather
+than being fixed.
 
 **Trigger.** After the first full eval run across the five locked strategies. If
 the data shows `FullInheritance` winning on quality-per-token at low depth, that
@@ -69,3 +75,17 @@ pipeline is built.
 - **Conversation list pagination.** The list route returns every conversation a
   user owns. Fine at portfolio scale; revisit if a test account ever gets past a
   few hundred.
+
+---
+
+## Deferred cost work
+
+- **Prompt caching for the composed prefix** (raised 2026-09-03, section 8.15
+  D11). Cached input is ~90% cheaper, and cache reads do not count toward
+  rate limits. `FullInheritance` resends the entire ancestor chain on every turn,
+  so it is the arm that would benefit most — and section 8.15 D3 chose real
+  multi-turn messages partly *because* separate ancestor turns form a
+  byte-identical prefix that grows at the end, which is what a cache breakpoint
+  needs. Not built: section 13 says measure first, and section 7's first eval run
+  is what produces the token numbers that would justify it. **Trigger: if an eval
+  run's cost or its rate-limit ceiling becomes the thing slowing iteration.**

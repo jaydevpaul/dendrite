@@ -38,7 +38,7 @@ populated → branch, null → continuation; regeneration never deletes.
 - A frontend slice may not begin before the backend capability it renders
   exists (decision record §8.10).
 
-## Current state (2026-09-02)
+## Current state (2026-09-03)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
@@ -55,7 +55,12 @@ the Vite proxy.
 interface and its five implementations, the decay function, eval framework,
 the graph navigator.
 
-Everything is committed, through `b97258d`. The working tree is clean.
+**All twelve Layer C shape decisions are settled and written up as §8.15
+(D1–D12).** Do not re-litigate them. `tests/test_llm_fake.py` is already written
+and waiting for C1's code.
+
+Committed through `a0eba33`. Uncommitted: §8.15 in the decision record, two
+`ROADMAP.md` corrections, and `tests/test_llm_fake.py`.
 
 ### Running it
 
@@ -136,6 +141,20 @@ there silently re-breaks the connection.
   `response.json()["message"]` raises `KeyError`, and two runs signing up the
   same fixture email collide on `UniqueViolation`. Cost one debugging round on
   2026-09-02, on code that was correct.
+- **Compose from the *user* message, never from the blank assistant row.**
+  §8.14 inserts a blank assistant message before streaming, and it is tempting
+  to walk from *that*. Doing so puts the anchored branch edge at depth 2, where
+  §8.13's rule answers with `Conversation.default_strategy` instead of
+  `SpanOnly`. No error and no exception — every branch silently resolves to the
+  wrong strategy, branching stops working, and §7 reports five strategies while
+  comparing four. Resolve and walk from the user message, *before* the blank row
+  is inserted (§8.15 D2).
+- **SSE frames are newline-delimited, so chunk text must be JSON-encoded.** A
+  bare newline inside `data:` ends the frame, and model output is full of them —
+  the failure presents as the model producing broken markdown, not as a
+  transport bug (§8.15 D10). Related: the stream comes back from a `POST`, so
+  the browser's `EventSource` (GET only) cannot read it — `fetch()` plus a
+  `ReadableStream` reader.
 - Do not pipe a backgrounded dev server through `tail` — it buffers and the log
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
@@ -149,25 +168,40 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Layer C — generation.** The walk it reads (B2) is built and tested, and
-frontend slice 3 is blocked on it. Two things it needs before any route:
+**Layer C — generation, sitting C1.** Every shape decision is settled in
+**§8.15 (D1–D12)**; read that first and do not re-litigate it. Streaming is SSE
+via `StreamingResponse`, not websockets (§8.8).
 
-- The **`LLMClient` protocol** (`generate` + `embed`) from §8.8, with one
-  concrete implementation and a **`FakeLLMClient`** — the fake is what lets
-  context composition be tested without network calls or spend.
-- The **strategy interface** and its five implementations (§5), since
-  `resolve_strategy` now answers *which* one to run but nothing implements
-  them. `HierarchicalDecay` also needs the **decay function** behind its own
-  interface (§5 locks it swappable) — and that is where §8.4's `~3` full-
-  fidelity tier actually lives (§8.13).
+The nine sittings, in dependency order — each is one hand-typing session:
 
-The streaming write pattern is already settled as **§8.14**: buffer the stream
-and write `content` once at completion, so §9's "moves only on edit" stays
-true. Its consequence is the first thing to decide in the layer — a blank
-message row is visible for the duration of a generation, and nothing yet
-distinguishes it from a genuinely empty message (§12's open item).
+| # | Piece | Needs |
+|---|---|---|
+| **C1** | `LLMClient` protocol, `FakeLLMClient`, LLM config keys | nothing |
+| C2 | Context types, strategy interface, `FullInheritance`, `ParentOnly`, `SpanOnly` | the B2 walk |
+| C3 | Decay function interface + `TieredDecay` + the summary reader | DB |
+| C4 | `HierarchicalDecay` | C3 |
+| C5 | Ancestor-scoped pgvector retrieval + `HierarchicalDecayWithRetrieval` | C4 |
+| C6 | `compose_context()` — resolve → walk → dispatch → degradations | C2–C5 |
+| C7 | Generation service — §8.14's write pattern, the `Generation` row, the failure path | C6 |
+| C8 | SSE route, the four events, `MessageOut.pending` | C7 |
+| C9 | The one concrete OpenAI client, against the real API | last, on purpose |
 
-Streaming is SSE via `StreamingResponse`, not websockets (§8.8).
+C9 is deliberately last: everything above it is testable against the fake with
+no key and no spend.
+
+**C1 concretely:** hand-type `app/llm/base.py` (the `LLMClient` protocol,
+`PromptMessage`, `TextDelta`, `Completed`) and `app/llm/fake.py`
+(`FakeLLMClient`, `fake_vector`, `EMBEDDING_DIMENSIONS`), plus the LLM keys in
+`app/core/config.py`. **`tests/test_llm_fake.py` is already written** (28 tests)
+— it is the spec for the two modules, so read it before typing. Then
+`pytest tests/test_llm_fake.py`. No database, no network.
+
+Two things the fake must get right, both load-bearing for C2–C6: it **records
+every prompt it was handed** (that recording is the only proof a strategy
+composed correctly), and its embeddings **bucket words rather than hashing the
+whole string**, so similar text really is nearer under cosine distance — a
+whole-string hash would scatter near-identical sentences and every retrieval
+test would assert on noise while appearing to pass.
 
 After that, **frontend slice 3 — linear chat**. Slice 3 also **moves the
 conversation list into a persistent left sidebar**: the app should read like
@@ -183,38 +217,45 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-02**: **Backend B2 built** — the §8.4 ancestor walk, strategy
-  resolution by walk-up, and a read endpoint; tests 103 → 155, in four commits
-  (`34931ed`, `223012e`, `98a5ac6`, `b97258d`). Seven spec-silent or
-  spec-conflicting questions settled before typing, all written into the
-  decision record as **§8.13** with pointer notes on §5, §6, §8.4, §9 and a new
-  §12 open item.
-  Two findings mattered more than the code. **§8.4's "~3" is a fidelity tier,
-  not a bound on the walk** — read as a query cap it makes `FullInheritance`
-  ("the entire ancestor chain") unbuildable and collapses `HierarchicalDecay`
-  into it, since nothing older would be left to summarize; the walk now climbs
-  to the root with 200 as a runaway guard. And **strategy resolution never
-  crosses a branch boundary**, which reconciles §5's "branches default to
-  SpanOnly" with §6's walk-up: §6's own table permits null "on branches that
-  accept the default", so null on a branch *means* SpanOnly while null on a
-  continuation means keep climbing. `SpanOnly` is the one value never inherited
-  downward (§5 locks it branch-only). Resolution returns a `source`
-  (`edge` | `branch_default` | `branch_boundary` | `conversation_default` |
-  `depth_cap`), because four of five outcomes answer with the conversation
-  default and a test asserting only the strategy would pass for a right answer
-  reached down the wrong path.
-  **A deadlock cost a debugging round, on correct code.** Two `pytest` runs
-  shared one `dendrite_test`, and the per-test `TRUNCATE` takes ACCESS
-  EXCLUSIVE on every table; the knock-on failures were the misleading part —
-  a truncate landing mid-test wipes the fixture user, so
-  `response.json()["message"]` raises `KeyError` and reads as a bug in
-  `create_message`. Each run now builds `dendrite_test_<pid>`.
-  Only two bugs in hand-typed code this time, both spelling (`messsage`,
-  `StrategyReolution`) — Python named both in the error text. `StrategySource`
-  moved to `app/models/_shared.py` so the response schema stops importing from
-  a service.
-  **Next: Layer C (generation)** — the `LLMClient` protocol and its fake, the
-  five strategy implementations, the decay function, and §12's
-  `Message.updated_at`-under-streaming decision, whose trigger is this layer.
-  **Next: backend B2** — the §8.4 recursive-CTE ancestor walk and strategy
-  resolution by walk-up.
+- **2026-09-03**: **Layer C decided, nothing built in `app/`.** Deliberate —
+  §8.12 and §8.13 were settled before B1 and B2 and both saved rework, so Layer
+  C got the same treatment. Output: **§8.15 (D1–D12)** in the decision record,
+  pointer notes on §5 and three §9 rows, one §12 item struck through as resolved
+  and one narrowed, `tests/test_llm_fake.py` (28 tests), and two `ROADMAP.md`
+  corrections.
+  **§12's in-flight-generation item is closed by deriving, not storing (D1)** —
+  `MessageOut.pending` = `role == "assistant" and content == ""`, which works
+  only because §8.12 made the API refuse empty `content`. A `status` column was
+  rejected: a LOCKED §9 migration for something derivable, which *also* fails
+  its own headline case (a process dying mid-stream runs no handler, so the
+  column sticks at `'generating'` exactly as a blank row does).
+  **Two recommendations were reversed on push-back, both correctly.** The prompt
+  shape went from one text envelope to **real multi-turn** (D3) once it was
+  pointed out that a summarized ancestor can keep its original role with a
+  `[summarised]` marker — and multi-turn then also wins on caching, since
+  separate turns form a byte-identical growing prefix. And **thinking stays on**
+  (D11): thinking tokens scaling with input size is the *treatment's effect*,
+  not a confound, so switching it off would have understated the thesis rather
+  than cleaning up the metric.
+  **Retrieval promotes a fraction, not a fixed k (D6).** `k = 10` would promote
+  *every* summary on any chain shallower than depth 13 — six exchanges under
+  message-as-node — making arm 5 byte-identical to `FullInheritance` on most of
+  §7's fixtures. `min(ceil(n_summarized / 3), 10)` makes that impossible.
+  **§8.14's `updated_at` claim was off by one write (D8)** — `onupdate` fires on
+  the completion UPDATE, so the fix is `message.updated_at = message.created_at`
+  in that same UPDATE. Not a reopening; buffer-and-write-once stands.
+  **A trap caught before typing, now a standing gotcha:** composing from the
+  blank assistant row puts the anchored edge at depth 2, where §8.13 answers
+  with the conversation default instead of `SpanOnly` — branching would silently
+  stop working.
+  **Model settled (D11):** OpenAI throughout — `gpt-5.6-luna` (`effort: low`)
+  generating, `gpt-5.6-terra` judging, `text-embedding-3-small` embedding. ~$13
+  for the whole eval phase against ~$75 on Claude; the deciding number was
+  marginal, not total — $2.59 per extra eval run versus $14.15.
+  **One process lesson.** Two research agents burned ~25 min and ~335k tokens
+  pricing models, only to confirm every candidate runs the eval for under a
+  dollar. The back-of-envelope arithmetic had already been done *in the same
+  session* and was the whole answer. When a rough number shows the decision
+  doesn't turn on the unknown, don't go measure the unknown.
+  **Next: sitting C1** — `app/llm/base.py` and `app/llm/fake.py` plus the LLM
+  config keys, against the test file that is already written.

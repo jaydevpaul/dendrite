@@ -629,3 +629,124 @@ Related documents:
   decay function (§5), SSE streaming, and §12's `Message.updated_at`-under-
   streaming open item, whose trigger is precisely this layer. Frontend slice 3
   (linear chat, conversation list into a persistent sidebar) is blocked on it.
+
+---
+
+## 2026-09-03 — Layer C decided (no code): §8.15, D1–D12
+
+**Nothing was built in `app/` this session.** The output is a decision record
+section, one test file, and two corrected docs. That was the intent — 8.12 and
+8.13 were decided before B1 and B2 and both saved rework, so Layer C got the
+same treatment.
+
+- **§8.15 written — twelve decisions (D1–D12)**, `docs/Dendrite_Decision_Record.md`.
+  One resolves a §12 open item, one corrects a supporting claim in §8.14, ten
+  are shape decisions the spec was silent on. Pointer notes added to §5 (decay
+  interface), §9 (`Message.content`, `Message.updated_at`, `Generation.strategy_used`)
+  and §12 (one item struck through as resolved, one narrowed).
+
+- **The §12 open item is closed by deriving, not storing (D1).** `MessageOut`
+  gains a computed `pending: bool` = `role == "assistant" and content == ""`.
+  This only works because §8.12 made the API refuse empty `content`, so a blank
+  assistant row can only have come from the generation route — blankness already
+  *means* "a generation happened here". Both other candidates fail: deriving
+  from a missing `Generation` row contradicts §8.12 (a missing row means *not
+  generated*, i.e. every eval fixture would read as forever-generating), and
+  hiding the row breaks §8.12's "every node and every link" contract — the edge
+  would have to be hidden too, so the client's parent→children map would point
+  at a message absent from the list. A `status` column was rejected as a LOCKED
+  §9 migration for something derivable that *also* doesn't fix its own headline
+  case: a process dying mid-stream runs no handler, so the column sits at
+  `'generating'` forever exactly as a blank row does.
+
+- **Two decisions were reversed mid-discussion, both on the user's push-back,
+  both correctly.**
+  - *Prompt shape (D3).* First recommendation was one uniform envelope (system
+    preamble + a single user message holding the transcript as text), argued on
+    eval cleanliness. The objection — a summarized ancestor can just keep its
+    original role with a `[summarised]` marker — dissolved the "summaries have
+    no honest role" half of the case, and real multi-turn then won on three
+    counts: it is the native format, it makes `FullInheritance` a genuinely
+    naive baseline, and separate ancestor turns form a byte-identical growing
+    prefix that a cache breakpoint can use, where one combined string is
+    invalidated whole. Cost is two small rules (original role + marker; a
+    placeholder user turn when the oldest turn would be an assistant one, which
+    fires only for `ParentOnly` on a branch).
+  - *Thinking (D11).* First recommendation was thinking **off**, on the grounds
+    that thinking tokens scale with input size and would pollute
+    quality-per-token. That was wrong: a term that varies with the treatment is
+    the treatment's *effect*, not a confound. Decay's real saving is fewer input
+    tokens **and** less thinking on top, and §7's "total tokens (in+out)" is
+    written to capture exactly that — so switching it off would have understated
+    the thesis. Thinking stays on, held constant across all five arms, with
+    three repeats per cell to absorb its run-to-run variance (which is where the
+    375-generations-per-eval-run figure comes from).
+
+- **The retrieval count is a fraction, not a fixed k (D6).** With
+  `full_depth = 3`, a chain of depth *D* has *D − 3* summarized ancestors, so
+  `k = 10` promotes **all** of them on anything shallower than depth 13 — six
+  exchanges under message-as-node — and `HierarchicalDecayWithRetrieval` becomes
+  byte-identical to `FullInheritance` on most of §7's fixtures. Five baselines
+  quietly become four. `min(ceil(fraction × n_summarized), max_promotions)` with
+  `fraction = 1/3` makes that structurally impossible: two thirds of the
+  summaries always survive. `ceil` not `floor`, or a short chain promotes zero
+  and the arm degenerates into plain decay. `max_promotions = 10` is a runaway
+  guard in the `WALK_SAFETY_CAP` sense — the walk reaches 200, where a third
+  would be 66 full messages.
+
+- **§8.14's claim about `updated_at` was off by one write (D8).** It states that
+  §9's "(moves only on edit)" stays true under buffer-and-write-once. It does
+  not: `onupdate=func.now()` fires on the completion UPDATE too, so every
+  generated message would carry `updated_at > created_at` having never been
+  edited. Fix is one assignment — `message.updated_at = message.created_at` in
+  that same UPDATE, since an explicit value beats `onupdate`. Not a reopening of
+  §8.14; buffer-and-write-once stands. What it buys is real: §6 ties **anchor
+  repair** to edits specifically, so "was this edited?" needs to be answerable.
+
+- **A trap found before it was typed, and promoted to a standing gotcha.**
+  Composing from the blank assistant row instead of the user message puts the
+  anchored branch edge at depth 2, where §8.13's rule answers with the
+  conversation default rather than `SpanOnly`. No error, no exception —
+  branching would simply stop working while the eval reported five strategies.
+
+- **Model and cost settled (D11):** OpenAI throughout — `gpt-5.6-luna` at
+  `effort: low` for generation, `gpt-5.6-terra` for §7's judge,
+  `text-embedding-3-small` for embeddings (§9's lock, and the reason the vendor
+  question was only ever about generation, Anthropic having no embeddings
+  endpoint). Verified live 2026-09-03: **$0.79 generation + $1.80 judge per eval
+  run**, against $8.78 + $5.37 for `claude-sonnet-5` / `claude-opus-5` (both
+  carry a newer tokenizer producing ~30% more tokens for identical text). ~$13
+  against ~$75 across five runs. The **marginal** number decided it — $2.59 per
+  extra run versus $14.15 is the difference between re-running the eval whenever
+  a decay parameter changes and rationing it.
+
+- **The research detour was badly misjudged.** Two background agents were
+  launched to price open-weight and budget-frontier models; they returned
+  thorough, well-sourced tables — and burned ~25 minutes and ~335k subagent
+  tokens to establish that *every* candidate runs the eval for under a dollar,
+  i.e. that cost was never the binding constraint. The arithmetic ($20/run on
+  Opus 5) had already been done in the same session, before the agents were
+  launched, and should have been the whole answer. Lesson: when a back-of-envelope
+  number already shows the decision doesn't turn on the unknown, don't go
+  measure the unknown.
+
+- **A stale claim corrected in `ROADMAP.md`.** The `AdaptiveBudget` entry argued
+  its own premise might not bind because "§8.4 bounds that walk at roughly depth
+  3" — the exact misreading §8.13 overturned. The walk climbs to the root, so
+  the composed context is *not* already small and that argument is dead. Struck
+  through with the correction rather than deleted. Prompt caching for the
+  composed prefix also logged there, with a trigger.
+
+- **`tests/test_llm_fake.py` written (28 tests), ahead of the code.** The
+  important design point is that `FakeLLMClient` records every prompt it was
+  handed — that recording is the assertion surface for all of C2–C6, since the
+  only proof a strategy composed correctly is what the model *received*. Its
+  embeddings bucket words rather than hashing the whole string, so similar text
+  really is nearer under cosine distance; a whole-string hash would scatter
+  near-identical sentences and every D6 retrieval test would assert on noise
+  while appearing to pass.
+
+- **Next: sitting C1** — hand-type `app/llm/base.py` (the `LLMClient` protocol,
+  `PromptMessage`, `TextDelta`, `Completed`) and `app/llm/fake.py`
+  (`FakeLLMClient`, `fake_vector`), plus the LLM config keys, then run
+  `pytest tests/test_llm_fake.py`. No database and no network in this sitting.
