@@ -11,6 +11,7 @@ commit it once at the end.
 from app.models.conversation import Conversation
 from app.models.edge import Edge
 from app.models.message import Message
+from app.models.message_summary import MessageSummary
 from app.models.user import User
 
 # The assistant text a branch anchors into, with the offsets of the phrase
@@ -76,3 +77,31 @@ async def chain_of(session, conversation, length):
         messages.append(child)
 
     return messages
+
+
+async def new_summary(
+    session,
+    message,
+    summary_text="a shorter version of it",
+    model_used="fake-summariser",
+    created_at=None,
+):
+    """A derived summary hanging off a message.
+
+    `created_at` is normally left to the database, which fills it with the
+    transaction's clock - so several summaries written by one test all carry
+    the same timestamp. Pass it explicitly when a test needs one summary to be
+    genuinely older than another.
+    """
+    summary = MessageSummary(
+        message_id=message.id,
+        summary_text=summary_text,
+        model_used=model_used,
+    )
+
+    if created_at is not None:
+        summary.created_at = created_at
+
+    session.add(summary)
+    await session.flush()
+    return summary
