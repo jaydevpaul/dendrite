@@ -128,7 +128,9 @@ feature).
 
 Context construction sits behind an interface with these five implementations,
 selectable at runtime. This is the architectural concession that makes A/B
-evaluation possible without code changes.
+evaluation possible without code changes. **The interface as built — what the
+strategies are handed, what they return, and how a degradation is reported — is
+in 8.16.**
 
 **Decay function is swappable.** `HierarchicalDecay` is a family, not one fixed
 algorithm — the decay function (the rule setting how fidelity drops per ancestor
@@ -1214,6 +1216,130 @@ resends the entire chain every turn, so it is the obvious cost win — but secti
 
 ---
 
+### 8.16 Layer C build decisions — the strategy interface as typed (decided 2026-09-05)
+
+Taken while building C1 and C2, when 8.15 was silent on them. Recorded here for
+the same reason as 8.7: the code now embodies these, so the spec should say them
+rather than leave them to be re-derived. None touches a LOCKED item — no column,
+no index, no change to section 5's five strategies or section 6's topology.
+
+**Resources ride on the request; tuning rides on the constructor.**
+`StrategyRequest` carries `session`, `llm`, `question`, `anchor` and `walk`. The
+strategies themselves are frozen dataclasses taking no arguments, so a single
+instance serves every request and C6's dispatch table can hold one of each.
+
+The alternative — a session and a client injected into each strategy's
+constructor — forces a fresh set of strategy objects per generation, which
+collides with D6: `fraction` and `max_promotions` are constructor arguments
+*because* the eval harness sweeps them, and a swept configuration wants to
+outlive one request. Splitting it this way keeps the constructor meaning
+"how this strategy is tuned" and the request meaning "what this generation is
+composing", with no overlap.
+
+Consequence worth naming: `FullInheritance`, `ParentOnly` and `SpanOnly` never
+read `session` or `llm`. Carrying two fields three of five implementations
+ignore is the price of one uniform signature, and it is cheaper than an
+interface that changes shape at C3.
+
+**A strategy names itself.** `ContextStrategy` requires a `name: AnyStrategy`
+attribute, and `compose()` stamps it into `ComposedContext.strategy_used` — the
+caller never labels the result.
+
+This is what makes D7 mechanically true rather than merely intended. If C6
+labelled the result with the strategy it *asked* for, an 8.6 fallback would
+record `HierarchicalDecayWithRetrieval` for a run that actually executed
+`HierarchicalDecay`, and section 7's "arm 5 degraded in N% of runs" — computable
+only by comparing intent against record — would be uncomputable. With the
+strategy naming itself, the degraded run cannot misreport.
+
+**`as_payload()` emits `system` and `messages`, nothing else.** Section 9's
+`composed_context` is "the exact context sent to the LLM", so the payload holds
+exactly what went over the wire: no strategy name (it has its own column), no
+degradation list (D7 makes it derivable), no ids or timestamps. A replay is then
+a straight resend of the stored object.
+
+**One system preamble across all five strategies.** `SYSTEM_PROMPT` is a module
+constant in `app/context/base.py`, identical for every arm. A per-arm preamble
+would be prompt engineering entering section 7's results as a
+context-composition effect — the same confound D4 rejected for the question
+turn, one turn higher up. The wording is a build-time choice, not a locked one;
+changing it changes all five arms together, which is the property that matters.
+
+It mentions the `[summarised]` marker even though nothing emits one until C3, so
+that the marker is interpretable the moment it appears without the preamble
+changing between eval runs.
+
+**The anchored span is fenced, not quoted.** `render_question` wraps the span in
+triple quotes on their own lines rather than prefixing it with `> `. An anchored
+span is an arbitrary substring of a model reply and can contain newlines, which
+would break out of a Markdown blockquote after the first line and silently merge
+the rest of the span into the question.
+
+**Truncation is reported only by the strategy it actually degraded.**
+`FullInheritance` appends `walk_truncated` to `degradations` when the walk hit
+its cap; `ParentOnly` and `SpanOnly` never do, because they read depth 1 and
+depth 0 and a cap 199 levels above them changed nothing about what they sent.
+
+The rule generalises: a strategy reports a degradation when the composed context
+differs from what that strategy promises, not when something upstream was
+imperfect. Reporting truncation from every arm would make the degradation rate
+of arms that cannot degrade non-zero, and D7's whole argument is that the
+degradation rate is a real finding recoverable from stored data.
+
+**`SpanOnly` raises rather than falling back.** Composing `SpanOnly` for a
+message with no anchor raises `SpanOnlyRequiresAnchor`. 8.13 makes resolution
+structurally unable to answer `SpanOnly` for a continuation, so nothing in the
+app can reach this; section 7's harness names strategies directly, so it is the
+one caller that can. A quiet degradation to `ParentOnly` would file one arm's
+numbers under another arm's column — the failure mode most damaging to the
+deliverable, and invisible in the output.
+
+**Summary selection is "most recent", with the model filter deferred — this
+narrows section 9.** Section 9's `MessageSummary` note names the selection rule
+as "most recent for the **active model**". The C3 reader implements most-recent
+only, with no `model_used` filter. Recorded here rather than pivoted silently,
+per the repo rule on locked decisions.
+
+The filter is not buildable yet. Nothing writes summaries until Layer D, and
+D11 names model ids for exactly three call sites — generation, embedding and the
+judge. Summarization is not one of them, so "the active model" has no value in
+config to compare a row against; implementing the filter now would mean
+inventing a fourth model id to make the `WHERE` clause well-formed, which is the
+invented-decision failure the working rules exist to prevent.
+
+**The risk being carried is different in kind from 8.2's.** 8.2's "never omit
+`model_used`" is about *embeddings*, where two models produce vectors in
+different spaces and a mixed query is arithmetically meaningless. Summaries are
+text, so a mixed set breaks nothing mechanically. It shows up in section 7
+instead: if a message is re-summarized by a better model partway through a
+campaign, `HierarchicalDecay` and `HierarchicalDecayWithRetrieval` quietly begin
+sending better summaries, and a summarizer upgrade reads as a
+context-composition win. Invisible in the output, and confined to the two arms
+the thesis depends on.
+
+Two things make that recoverable rather than absorbed:
+
+- **The reader takes an optional model argument, defaulting to `None`.** Turning
+  the filter on is then a call-site change, not a rewrite of the reader and its
+  tests.
+- **Selection orders by `id DESC`, not `created_at DESC`.** Rows written in one
+  transaction share a single `now()`, so `created_at` ties and "most recent"
+  degrades to whatever Postgres returns first. The v7 keys of 8.3 sort in
+  creation order, which makes the id both a deterministic tiebreak and the same
+  answer.
+
+*Trigger for closing this:* when Layer D lands summarization and a summarization
+model id enters config, pass it and section 9's rule holds as written.
+Immediately, and ahead of that, if summaries are ever regenerated with a
+different model while section 7's fixtures exist.
+
+**Deliberately deferred, not overlooked.** `Fidelity` and the decay-function
+protocol belong to C3, which defines them alongside the interface that consumes
+them; the name→strategy registry belongs to C6, which is where dispatch lives.
+C2 shipped neither, per the repo's one-layer-at-a-time rule.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:
@@ -1291,7 +1417,9 @@ CHECK (strategy_override <> 'SpanOnly' OR anchor_start IS NOT NULL)     -- SpanO
 | created_at | timestamptz | NOT NULL, default now() |
 
 No unique constraint — many summaries per message allowed. Selection logic
-("most recent for the active model") lives in code.
+("most recent for the active model") lives in code. **The model half of that
+rule is deferred until a summarization model id exists in config — the reader
+selects most-recent only; see 8.16.**
 
 ### MessageEmbedding
 | Column | Type | Notes |

@@ -750,3 +750,193 @@ same treatment.
   `PromptMessage`, `TextDelta`, `Completed`) and `app/llm/fake.py`
   (`FakeLLMClient`, `fake_vector`), plus the LLM config keys, then run
   `pytest tests/test_llm_fake.py`. No database and no network in this sitting.
+
+---
+
+## 2026-09-05 — Layer C built: C1 (the LLM seam) and C2 (context composition)
+
+Two sittings in one session, both hand-typed against test files written first.
+The suite is **204 passing**, up from 155.
+
+- **C1 — `app/llm/`.** `base.py` carries the `LLMClient` protocol (`generate` +
+  `embed`), `PromptMessage`, `TextDelta`, `Completed` and
+  `EMBEDDING_DIMENSIONS`; `fake.py` carries `FakeLLMClient`, `RecordedCall`,
+  `FakeLLMError` and `fake_vector`. The seven LLM config keys went into
+  `app/core/config.py` — `llm_base_url`, `llm_api_key`, `generation_model`
+  (`gpt-5.6-luna`), `generation_effort` (`low`), `judge_model`
+  (`gpt-5.6-terra`), `embedding_model` (`text-embedding-3-small`),
+  `retrieval_timeout_seconds` (1.0, a chosen value — the spec fixes the 1–2s
+  whole-compose budget, not this slice of it). No validator on the API key: the
+  first thing that needs it is C9, and a startup warning now would fire on
+  every test run for nothing.
+
+- **`test_llm_fake.py` holds 23 tests, not 28.** The count was wrong in three
+  places (this file, CLAUDE.md twice). Corrected here; the decision record's own
+  copy of the number is flagged for the user rather than edited.
+
+- **Two implementation details in the fake worth keeping.** `fake_vector` hashes
+  with `blake2b`, not the builtin `hash()` — string hashing is salted per
+  process, so builtin `hash()` would have made embeddings differ between two
+  `pytest` runs and every retrieval assertion would have been unreproducible.
+  And `chunks` is defaulted with `is None`, not `or`: `chunks=[]` is a legal
+  script (a model may return nothing) and must still yield a `Completed`, which
+  `or` would have silently replaced with the default two-chunk reply.
+
+- **C2 — `app/context/`.** `base.py`: `SYSTEM_PROMPT`, `WALK_TRUNCATED`,
+  `EARLIER_PLACEHOLDER`, `Anchor` (+ `from_edge`), `anchor_from_walk`,
+  `StrategyRequest`, `ComposedContext` (+ `as_payload`), the `ContextStrategy`
+  protocol, `full_turn`, `render_question`, `ensure_leading_user_turn`.
+  `strategies.py`: `FullInheritance`, `ParentOnly`, `SpanOnly`,
+  `SpanOnlyRequiresAnchor`. `tests/test_context_strategies.py` is 26 tests,
+  run against the *real* recursive-CTE walk rather than a hand-built one — the
+  anchor comes off the depth-1 edge, and that coupling is only real if a real
+  query produced the step.
+
+- **Shape decisions taken during the build, none of which the spec covers.**
+  (1) Resources ride on the request, tuning rides on the constructor:
+  `StrategyRequest` carries `session` and `llm`, so the strategies stay frozen
+  argument-free singletons, while `fraction`/`max_promotions` remain constructor
+  args as D6 requires. (2) A strategy names itself via a `name` attribute rather
+  than being labelled by its caller, which is what makes a fallback record what
+  actually ran. (3) `ComposedContext.as_payload()` emits `system` + `messages`
+  only — `strategy_used` has a column and degradations are derivable, so neither
+  belongs in the record of what was *sent*. (4) One `SYSTEM_PROMPT` for all five
+  strategies, wording chosen here; a per-strategy preamble would be prompt
+  engineering measured as a composition result. (5) The highlighted span is
+  fenced with `"""` rather than prefixed with `>`, because a span can contain
+  newlines.
+
+- **Truncation is reported only by the strategy it actually degraded.**
+  `FullInheritance` promises the entire chain, so a capped walk is a real
+  degradation and it reports `walk_truncated`. `ParentOnly` and `SpanOnly` read
+  depth 1 and depth 0, so a cap 199 levels above them changed nothing about what
+  they sent, and claiming a degradation there would inflate the
+  "arm N degraded in M% of runs" arithmetic that D7 makes derivable.
+
+- **`SpanOnly` raises rather than falling back.** Resolution structurally cannot
+  answer `SpanOnly` for a continuation, but the eval harness names strategies
+  directly, so it is the one caller that can ask. `SpanOnlyRequiresAnchor` beats
+  a quiet degradation to `ParentOnly`, which would file one strategy's numbers
+  under another's.
+
+- **Deliberately not built, to keep each sitting one layer:** `Fidelity` and the
+  decay-function protocol (C3 owns them), and the name→strategy registry (C6's
+  dispatch step).
+
+- **A bug that would not have surfaced as a bug.** `Anchor.from_edge` was typed
+  as `Edge.anchor_start` — the class, not the row it was handed. It typechecks,
+  it runs, and it puts `(<class 'int'>, <InstrumentedAttribute>)` into the
+  prompt where the highlighted text belongs. Same family as the
+  `Conversation`/`conversation` typo from B1, and now a standing gotcha.
+
+- **A working rule changed by request: no spec citations in anything read while
+  coding.** No `§8.15`, no `D4`, no `C7`, in code comments, docstrings or chat —
+  state the reason in a plain sentence instead. The rationale is that a pointer
+  to a document nobody has time to open is noise where one sentence would have
+  done the job. The C2 files and `test_context_strategies.py` were rewritten to
+  match; `test_llm_fake.py` predates the rule and still carries citations.
+
+- **Environment:** Docker Desktop lives under
+  `%LOCALAPPDATA%\Programs\DockerDesktop`, not `Program Files`. Tests must run
+  as `.venv/Scripts/python.exe -m pytest` — the global 3.14 on PATH has no
+  pytest installed.
+
+- **Next: sitting C3** — the decay-function interface (`assign(steps)` →
+  `list[Fidelity]`), `TieredDecay(full_depth=3)`, and the summary reader that
+  turns a summarized step into a `[summarised]`-prefixed turn keeping its
+  original role. First sitting that touches `MessageSummary`, and the first
+  where a missing summary has to degrade to full text rather than fail.
+
+---
+
+## 2026-09-05 — Layer C built: C3 (the decay function and the summary reader)
+
+Third sitting of the day, hand-typed against a test file written first. Suite is
+**230 passing**, up from 204.
+
+- **`app/context/base.py` additions.** `Fidelity = Literal["full", "summary"]`
+  — no drop level, because summarized-not-dropped is what lets a token saving be
+  credited to summarizing rather than to having sent fewer ancestors. The
+  `DecayFunction` protocol with `assign(steps) -> list[Fidelity]`, taking the
+  whole chain rather than a bare depth: "keep the newest third full" needs the
+  chain's length and a token-budget rule needs the messages' lengths, and
+  neither is recoverable from a single number. Plus `SUMMARY_MISSING`,
+  `SUMMARY_MARKER = "[summarised]"`, and `summarised_turn()`, which keeps the
+  original role so a summary of what someone said is still attributed to them.
+
+- **`app/context/decay.py`.** `TieredDecay(full_depth=3)` — the only place the
+  three-level tier is written down. It reads `step.depth`, never the list
+  position: the walk returns nearest-first and a prompt reads oldest-first, so
+  both orders are in circulation and an `enumerate()` would give a reversed
+  chain a reversed answer. Pinned by
+  `test_it_reads_the_depth_and_not_the_position`.
+
+- **`app/services/summary.py`.** `load_summaries(session, ids, model=None)` —
+  ids in, map out, one query for the whole chain. A message with no summary is
+  simply **absent** from the map rather than present-and-empty, so the caller
+  sends full text; nothing writes summaries yet, so today that is every message,
+  and it has to be the ordinary path rather than a fault. `DISTINCT ON
+  (message_id)` with `ORDER BY message_id, created_at DESC, id DESC`.
+
+- **Where the reader lives.** The query is a service (`app/services/`, a plain
+  database read of a model, next to `ancestors.py`); the rendering is context
+  (`summarised_turn` beside `full_turn`). C4 is the first place the two meet.
+
+- **Summary selection — the one spec-silent decision, and it narrows §9.**
+  Section 9 names the rule as "most recent for the **active model**". Shipped:
+  most recent, with an **optional** `model` argument defaulting to `None`, so
+  the filter is off unless a caller pins one. No summarization model id exists
+  in config — D11 names three call sites and summarization is not among them —
+  so a default filter would have to guess a model name and would hide every real
+  summary behind that guess, quietly collapsing `HierarchicalDecay` into full
+  text. The optional argument is what makes turning it on a call-site change
+  later. Written up in §8.16 by the parallel session, along with a pointer added
+  to §9's `MessageSummary` note.
+
+- **Route to that decision.** The user was asked and chose no filter at all; a
+  peer session then argued the confound the parameter guards — a summarizer
+  upgraded partway through an eval campaign makes the two decay arms quietly
+  start sending better summaries, so a summarizer improvement reads as a
+  context-composition win. Surfaced rather than applied, since it reversed the
+  user's own call; four tests for the parameter arrived in the test file from
+  that session, and the user then chose to build it.
+
+- **`tests/test_decay_and_summaries.py`** — 26 tests (22 written here, 4 for the
+  model filter from the parallel session), plus a `new_summary` builder in
+  `tests/graph_builders.py` taking an optional `created_at` for when a test
+  needs one summary genuinely older than another. The decay tests build steps by
+  hand rather than walking a real graph: the tier reads nothing but `depth`, so
+  a test that had to build a graph would be re-testing the walk. Two tests worth
+  naming — `test_the_whole_chain_costs_one_query` counts statements through a
+  `before_cursor_execute` listener and pins the reader at 1, and
+  `test_the_later_id_breaks_a_timestamp_tie` covers `created_at` defaulting to
+  `now()`, which is *transaction* time, so summaries written in one transaction
+  share a timestamp and only the v7 id separates them.
+
+- **Three typos, none of which raised where they were written.** `TiredDecay`
+  for `TieredDecay` (caught by the import). `full_depth = 3` without its
+  annotation, which makes it not a dataclass field at all — the generated
+  `__init__` takes no arguments and the tier stops being swappable. And
+  `_post_init__` with one leading underscore, which is simply never called, so
+  the negative-depth guard vanished silently and `TieredDecay(full_depth=-1)`
+  built happily. Promoted to a standing gotcha in CLAUDE.md.
+
+- **Design question raised and answered: why not a sliding window?** Rather than
+  recomposing each turn, keep the previous context and slide it — add the new
+  ancestor full, demote the one falling out of the tier to its summary. Rejected
+  on three counts. It is a cache keyed on a *path*, and this is a tree, so
+  branching gives every path its own window. Summaries arrive late and can be
+  regenerated, so a cached window would keep serving "full text, no summary yet"
+  permanently — paying exactly the cost summarization exists to remove. And the
+  eval composes one message five ways, so a window serves one arm and the other
+  four recompute regardless. The saving it chases is ~1ms of Postgres against a
+  multi-second LLM stream; the real version of the same insight is provider-side
+  prompt caching, already logged as a roadmap item and already enabled by the
+  multi-turn prompt format.
+
+- **Next: sitting C4** — `HierarchicalDecay`, where the tier and the reader meet.
+  Walk, assign, load summaries in one query for the steps marked `summary`,
+  render each step full or summarized, append `SUMMARY_MISSING` once (not per
+  ancestor) when any marked step had no row. It reports `walk_truncated` too,
+  since it climbs to the root the way `FullInheritance` does. The decay function
+  is a constructor argument, not a hardcoded `TieredDecay()`.
