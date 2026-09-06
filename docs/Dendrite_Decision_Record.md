@@ -1672,6 +1672,24 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   DESC`, with the `model_used` filter available as an optional argument and off
   until a summarization model id exists in config. Section 8.16 carries all
   three parts and why each narrows section 9 without touching the schema.
+- **A third degradation name, `embedding_missing`, for arm 5 — decided
+  2026-09-06, to be built in C5.** 8.6 and D7 already cover the embed *call*
+  failing: the strategy falls back to `HierarchicalDecay` and records that, and
+  the eval derives the degradation by comparing the arm it asked for against the
+  arm the database says ran. They do not cover the call *succeeding* and finding
+  nothing. There, retrieval ran end to end, promoted nobody, and honestly
+  records itself as the retrieval arm — intent matches record, so D7'''s
+  derivation reads it as a clean run while the prompt is byte-identical to arm
+  4'''s. Nothing populates `message_embedding` yet, so on today'''s data *every*
+  arm-5 run is in that state. `EMBEDDING_MISSING = "embedding_missing"` fires
+  once per composition when any ancestor the decay function marked `summary` has
+  no embedding row — the same shape as `SUMMARY_MISSING`, and deliberately not
+  the same name: a summariser backlog and an embedder backlog are different
+  fixes, and `SUMMARY_MISSING` can fire on arms 4 and 5, so sharing a name would
+  leave arm 5'''s rate unable to say which job was behind. Falling back to plain
+  decay instead was rejected because it breaks on partial coverage — with three
+  of four candidates embedded, retrieval genuinely ran and a fallback would
+  discard real work. *Trigger: C5, before the retrieval tests are written.*
 - **How the tunable arms get their hyperparameters, and on what data.**
   Section 7 names the task set, the judge, the metrics and the deliverable, but
   says nothing about hyperparameter selection. `TieredDecay(full_depth=...)` is
