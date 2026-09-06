@@ -44,7 +44,7 @@ populated → branch, null → continuation; regeneration never deletes.
   section only when he asks where something is written down. (Applies to code
   written from 2026-09-05 on; `tests/test_llm_fake.py` predates it.)
 
-## Current state (2026-09-05)
+## Current state (2026-09-06)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
@@ -54,28 +54,27 @@ conversation routes (`POST|GET /conversations`, `GET|PATCH
 resolution by walk-up** (`app/services/ancestors.py`, `GET
 /conversations/{id}/messages/{message_id}/ancestors`) · **the LLM seam
 (`app/llm/base.py`, `app/llm/fake.py`, the seven LLM config keys)** · **context
-composition for three of the five strategies (`app/context/base.py`,
+composition for four of the five strategies (`app/context/base.py`,
 `app/context/strategies.py`)** · **the decay function and the summary reader
 (`Fidelity` + `DecayFunction` in `app/context/base.py`, `TieredDecay` in
 `app/context/decay.py`, `load_summaries()` in `app/services/summary.py`)** ·
-230 backend tests · frontend slices 1 and 2
+**`HierarchicalDecay`** · 250 backend tests · frontend slices 1 and 2
 (landing, signup/login, route guards, theme toggle, conversation list + create +
 detail with rename) verified end to end through the Vite proxy.
 
 **Not built:** summarization (the write side — nothing populates
-`message_summary` yet), embeddings,
-`HierarchicalDecay` and `HierarchicalDecayWithRetrieval`, `compose_context()`,
-the generation service and its SSE route, the one real OpenAI client, eval
-framework, the graph navigator.
+`message_summary` yet), embeddings, `HierarchicalDecayWithRetrieval`,
+`compose_context()`, the generation service and its SSE route, the one real
+OpenAI client, eval framework, the graph navigator.
 
 **All twelve Layer C shape decisions are settled and written up as §8.15
 (D1–D12).** Do not re-litigate them.
 
-Committed through `9c3108b`. **Uncommitted:** `app/llm/`, `app/context/`,
-`app/services/summary.py`, `tests/test_context_strategies.py`,
-`tests/test_decay_and_summaries.py`, the `new_summary` builder in
-`tests/graph_builders.py`, the LLM keys in `app/core/config.py`, and §8.16 in
-the decision record — C1, C2 and C3 all passing, none of it committed.
+Committed through `d273ab3` (C1–C3 and their write-up). **Uncommitted:**
+C4 — `HierarchicalDecay` in `app/context/strategies.py`, the blank-summary
+filter in `app/services/summary.py`, `counting_queries` moved into
+`tests/conftest.py`, and the new tests in `tests/test_context_strategies.py`
+and `tests/test_decay_and_summaries.py`. 250 passing, none of it committed.
 
 ### Running it
 
@@ -83,7 +82,7 @@ the decision record — C1, C2 and C3 all passing, none of it committed.
 docker compose up -d                          # Docker Desktop must be running
 uvicorn app.main:app --reload --port 8000     # repo root, .venv active
 cd frontend && npm run dev                    # :5173
-pytest                                        # repo root, 230 passing
+pytest                                        # repo root, 250 passing
 ```
 
 **Run pytest as `.venv/Scripts/python.exe -m pytest`** if the venv is not
@@ -157,6 +156,23 @@ there silently re-breaks the connection.
   underscore is simply never called, so every validation in it disappears with
   no error anywhere — `TieredDecay(full_depth=-1)` builds happily and
   summarizes the whole chain. Both shipped in C3 and neither raised.
+- **A two-field frozen dataclass has to declare its tuning argument first.**
+  `HierarchicalDecay` declares `decay` before `name`, so
+  `HierarchicalDecay(TieredDecay(full_depth=1))` sets the decay. Declared the
+  other way round — the way the three single-field strategies look — that same
+  call puts a `TieredDecay` instance into `name` and leaves the tier at its
+  default. `AnyStrategy` is a `Literal` hint and is not checked at runtime, so
+  nothing raises; the junk value surfaces later in `generation.strategy_used`.
+- **Postgres `btrim` trims spaces only unless you name the characters.**
+  `btrim("  \n  ")` returns `"\n"`, which is not empty, so a whitespace-only
+  summary passes an `!= ""` test. The reader spells the set out:
+  `func.btrim(col, " \t\r\n") != ""`. The SQL is well-formed and the query
+  runs either way — the code just quietly disagrees with you about what "blank"
+  means, and only a whitespace test catches it.
+- **A misplaced closing paren turns a query into a tuple, not a syntax error.**
+  `select(...).where(a), b` builds `(select, boolean)`, and the failure lands
+  later as `AttributeError` on a tuple at the next `.where()` or `.distinct()`,
+  pointing at the wrong line.
 - **The two ancestor walks are the same query with different stop rules**, and
   both live in `app/services/ancestors.py`. `walk_ancestors` climbs to the
   root; `resolve_strategy` stops at the first override *or* the first branch
@@ -206,7 +222,7 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Layer C — generation, sitting C4.** Every shape decision is settled in
+**Layer C — generation, sitting C5.** Every shape decision is settled in
 **§8.15 (D1–D12)**; read that first and do not re-litigate it. Streaming is SSE
 via `StreamingResponse`, not websockets (§8.8).
 
@@ -217,8 +233,8 @@ The nine sittings, in dependency order — each is one hand-typing session:
 | C1 | `LLMClient` protocol, `FakeLLMClient`, LLM config keys | nothing | **done** |
 | C2 | Context types, strategy interface, `FullInheritance`, `ParentOnly`, `SpanOnly` | the B2 walk | **done** |
 | C3 | Decay function interface + `TieredDecay` + the summary reader | DB | **done** |
-| **C4** | `HierarchicalDecay` | C3 | next |
-| C5 | Ancestor-scoped pgvector retrieval + `HierarchicalDecayWithRetrieval` | C4 | |
+| C4 | `HierarchicalDecay` | C3 | **done** |
+| **C5** | Ancestor-scoped pgvector retrieval + `HierarchicalDecayWithRetrieval` | C4 | next |
 | C6 | `compose_context()` — resolve → walk → dispatch → degradations | C2–C5 | |
 | C7 | Generation service — §8.14's write pattern, the `Generation` row, the failure path | C6 | |
 | C8 | SSE route, the four events, `MessageOut.pending` | C7 | |
@@ -227,30 +243,27 @@ The nine sittings, in dependency order — each is one hand-typing session:
 C9 is deliberately last: everything above it is testable against the fake with
 no key and no spend.
 
-**C4 concretely:** `HierarchicalDecay` in `app/context/strategies.py`, behind
-the same interface as the other three. It is the sitting where C3's two halves
-finally meet — walk the chain, ask the decay function for a fidelity per step,
-load summaries in one query for the steps marked `summary`, then render each
-step with `full_turn` or `summarised_turn`. Everything it needs already exists
-and is tested; C4 is assembly, not new machinery.
+**C5 concretely:** ancestor-scoped pgvector retrieval, then
+`HierarchicalDecayWithRetrieval` in `app/context/strategies.py`. The shape is
+settled in §8.15 D6 and should not be re-argued: decay runs **first**, then
+retrieval re-marks some steps that decay marked `summary` back to `full`, **in
+place** — never appended as a separate excerpts block, which would send the same
+message twice. Retrieval therefore only ever considers already-summarized steps,
+so it does nothing on a chain short enough that nothing was summarized, and it
+can never undo the full-fidelity tier.
 
-What C4 has to settle:
+How many get promoted is a fraction of the summarized count, not a fixed k:
+`min(ceil(fraction * n_summarized), max_promotions)`, with `fraction = 1/3` and
+`max_promotions = 10`. Both are constructor arguments so the eval can sweep
+them. The query is scoped by the walk's ancestor ids **and** filtered on
+`model_used`, and the query text is the user's message plus the anchored span.
+That `embed` call is the only network call in compose, so it is where §8.6's
+timeout and fallback live. No similarity threshold in MVP.
 
-- **The degradation rule.** A step marked `summary` whose id is absent from the
-  map is sent as full text, and that appends `SUMMARY_MISSING`. Append it once
-  for the whole compose, not once per ancestor — the eval reports a rate per
-  run, and a list holding the same name six times would have to be
-  de-duplicated before it could be counted.
-- **Whether `walk_truncated` applies.** The rule is that a strategy reports a
-  degradation only when the composed context differs from what *that strategy*
-  promises. `HierarchicalDecay` climbs to the root the same way `FullInheritance`
-  does, so a capped walk really did cut what it sent — this one reports it.
-- **The decay function is a constructor argument**, not a hardcoded
-  `TieredDecay()`. It is what makes the family swappable, and the strategy stays
-  a frozen dataclass one instance can serve every request from.
-
-`Fidelity`, `DecayFunction`, `SUMMARY_MISSING`, `SUMMARY_MARKER` and
-`summarised_turn()` all landed in C3 and need no changes.
+Also still open before the eval: **nothing has embedded anything yet**, the same
+way nothing had summarized anything before C4 — expect the same
+degrade-and-report shape, and check whether the missing-embedding case needs its
+own degradation name alongside `SUMMARY_MISSING`.
 
 After Layer C, **frontend slice 3 — linear chat**. Slice 3 also **moves the
 conversation list into a persistent left sidebar**: the app should read like
@@ -266,45 +279,52 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-05 (third sitting)**: **C3 built — the decay function and the
-  summary reader.** Hand-typed against a test file written first. Suite is
-  **230 passing**, up from 204.
-  **`app/context/base.py`** gained `Fidelity` (`"full" | "summary"`, no drop
-  level — summarized-not-dropped is what lets a token saving be credited to
-  summarizing rather than to sending fewer ancestors), the `DecayFunction`
-  protocol (`assign(steps) -> list[Fidelity]`, whole chain not a bare depth,
-  because "newest third full" needs the length and a budget rule needs the
-  message sizes), `SUMMARY_MISSING`, `SUMMARY_MARKER`, and `summarised_turn()`,
-  which keeps the ancestor's original role.
-  **`app/context/decay.py`** — `TieredDecay(full_depth=3)`, the only place the
-  tier is written down. Reads `step.depth`, never list position: the walk is
-  nearest-first and prompts are oldest-first, so an `enumerate()` would give a
-  reversed chain a reversed answer.
-  **`app/services/summary.py`** — `load_summaries(session, ids, model=None)`,
-  one query, `DISTINCT ON (message_id)` ordered `created_at DESC, id DESC`.
-  A message with no summary is **absent** from the map, not empty in it, so the
-  caller sends full text. Query lives in services, rendering in context.
-  **Summary selection narrows §9, which names the rule "most recent for the
-  active model".** Shipped as most-recent with an *optional* `model` argument
-  defaulting to `None`. No summarization model id exists in config, so a default
-  filter would guess a name and hide every real summary behind it. The user
-  first chose no filter at all; a parallel session argued the confound (a
-  summarizer upgraded mid-campaign makes the decay arms quietly send better
-  summaries, so a summarizer win reads as a composition win) and contributed
-  four tests, and the user then chose to build the optional argument. Written up
-  in §8.16 by that session. **Note the drift: §8.16 says the ordering is
-  `id DESC` "not `created_at DESC`"; the code orders by both.**
-  **`tests/test_decay_and_summaries.py`** — 26 tests, plus `new_summary` in
-  `tests/graph_builders.py`. Decay tests build steps by hand, since the tier
-  reads nothing but `depth`. `test_the_whole_chain_costs_one_query` counts
-  statements through a `before_cursor_execute` listener and pins the reader at 1.
-  **Three typos, two of which raised nothing where they were written** —
-  `full_depth = 3` without its annotation is not a dataclass field, and
-  `_post_init__` with one leading underscore is never called. Both now standing
+- **2026-09-06**: **C4 built — `HierarchicalDecay`**, plus a correction to
+  C3's summary reader. Suite is **250 passing**, up from 230. Assembly as
+  planned: nothing new was invented, and `Fidelity`, `DecayFunction`,
+  `TieredDecay`, `load_summaries()`, `summarised_turn()` and `SUMMARY_MISSING`
+  came from C3 unchanged.
+  **The strategy** assigns fidelities over the whole walk, collects the ids
+  marked `summary`, makes one `load_summaries()` call, then renders
+  nearest-first-reversed into prompt order with `full_turn` or
+  `summarised_turn`. `SUMMARY_MISSING` is a boolean set in the loop and
+  appended **once** after it — four short levels is one finding about one
+  compose, and the eval reports a rate per run. Severity is not lost, since
+  `composed_context` stores the payload and a later pass can count which turns
+  beyond the tier lack the marker. `walk_truncated` **does** apply here, unlike
+  `ParentOnly` and `SpanOnly`, because this arm climbs to the root. Order when
+  both fire is `[walk_truncated, summary_missing]`.
+  **`decay` is declared before `name`** so the positional form sets the decay;
+  the other way round it would land in `name` with nothing raising. Now a
+  standing gotcha above.
+  **23 new tests** in `tests/test_context_strategies.py`, built on
+  `a_deep_branch()` (seven ancestors, depths 1–7) with a `summarised` argument
+  selecting "older", "none" or "all". Query counts are pinned at **zero** for a
+  chain inside the tier and **one** for a deep chain. The cross-strategy block
+  now runs against `BUILT_STRATEGIES`, so all four arms answer for one system
+  preamble, one identical final question turn, and naming themselves.
+  `counting_queries` moved into `tests/conftest.py`.
+  **C3's reader now excludes blank summaries in the `WHERE`** —
+  `func.btrim(summary_text, " \t\r\n") != ""`. A blank summary is the message
+  gone, not a cheaper version of it, and it has to be excluded in the query
+  rather than dropped from the map afterwards: `DISTINCT ON` keeps only the
+  newest row, so a blank written today wins on recency and takes a good older
+  summary down with it. **Written up in §8.16**, which also picked up the
+  `created_at DESC, id DESC` correction and closed §12's "current summary
+  selection rule" item. Two `btrim` and paren gotchas from it are now standing
   gotchas above.
-  **A sliding window was considered and rejected** — it is a cache keyed on a
-  path, and this is a tree; summaries arrive late so a window would serve stale
-  full text forever; and the eval composes one message five ways. It chases ~1ms
-  of Postgres against a multi-second stream. Provider-side prompt caching is the
-  real version of the idea and is already on the roadmap.
-  **Next: sitting C4** — `HierarchicalDecay`, where the tier and the reader meet.
+  **Two decay variants considered and rejected.** Linear and exponential
+  collapse to a single cutoff depth while `Fidelity` has only two levels, so all
+  three would produce identical prompts; they need *graded* fidelity, which
+  needs a §9 change. A fractional tier (`ceil(len/3)`) does differ, but it makes
+  arm 4's token cost depend on fixture depth — the comparability D5 protected by
+  choosing depth over token budget — and sweeping `full_depth` gets most of it.
+  **Open item raised against §7: hyperparameter selection is unspecified.**
+  Arm 4 has one tunable knob and arm 5 has three, against zero for the three
+  baselines. Sweeping on the scenarios the results are reported from gives the
+  tuned arms N attempts to the baselines' one. Likely answer is a
+  tuning/reporting split (~8 of the 20–30 scenarios held back for sweeping, the
+  rest run once). Not settled — logged as a §12 open item, triggered on "before
+  the eval harness is built".
+  **Next: sitting C5** — ancestor-scoped pgvector retrieval and
+  `HierarchicalDecayWithRetrieval`.

@@ -940,3 +940,147 @@ Third sitting of the day, hand-typed against a test file written first. Suite is
   ancestor) when any marked step had no row. It reports `walk_truncated` too,
   since it climbs to the root the way `FullInheritance` does. The decay function
   is a constructor argument, not a hardcoded `TieredDecay()`.
+
+---
+
+## 2026-09-06 — Layer C built: C4 (HierarchicalDecay), plus a correction to C3's reader
+
+**Sitting C4 built.** `HierarchicalDecay` in `app/context/strategies.py`, behind
+the same interface as the other three. Suite is **250 passing**, up from 230.
+Assembly, as planned — nothing new was invented; `Fidelity`, `DecayFunction`,
+`TieredDecay`, `load_summaries()`, `summarised_turn()`, `SUMMARY_MISSING` and
+`SUMMARY_MARKER` all came from C3 unchanged.
+
+- **The shape.** `decay: DecayFunction = TieredDecay()` first, `name` second.
+  Field order matters here in a way it does not for the other three, which have
+  `name` as their only field: with `name` declared first,
+  `HierarchicalDecay(TieredDecay(full_depth=1))` would put a `TieredDecay`
+  instance into `strategy_used` and leave the tier at its default. `AnyStrategy`
+  is a `Literal` hint and is not checked at runtime, so nothing would raise — the
+  junk value would only surface later in the `generation.strategy_used` column.
+
+- **The algorithm.** Assign fidelities over the whole walk, collect the ids of
+  the steps marked `summary`, one `load_summaries()` call, then render
+  nearest-first-reversed into prompt order with `full_turn` or `summarised_turn`.
+  `ensure_leading_user_turn` at the end, same as `FullInheritance`.
+
+- **`SUMMARY_MISSING` is a boolean set in the loop and appended once after it**,
+  never appended per ancestor. Four short levels is one finding about one
+  composition, and the eval reports a rate per run — a list holding the same name
+  four times would have to be de-duplicated before it could be counted. Severity
+  is not lost: `composed_context` stores the exact payload, so a later analysis
+  can count which turns beyond the tier depth lack the marker.
+
+- **`walk_truncated` does apply here**, unlike `ParentOnly` and `SpanOnly`. This
+  arm climbs to the root the way `FullInheritance` does, so a capped walk really
+  did cut what it sent. Order when both fire is `[walk_truncated,
+  summary_missing]` — arbitrary, but fixed so tests can assert list equality.
+
+- **`tests/test_context_strategies.py`** — 23 new tests. `a_deep_branch()` builds
+  seven ancestors (depths 1–7) so the default tier bites, with a `summarised`
+  argument selecting "older" (the ordinary case), "none" (nothing summarized yet)
+  or "all" (so a test can prove the tier decides what is sent, not what happens
+  to be in the table). Two query-count tests: a chain inside the tier costs
+  **zero** queries, a deep chain costs exactly **one**.
+
+- **The cross-strategy block now runs against `BUILT_STRATEGIES`**, not
+  `SIMPLE_STRATEGIES` — four arms held to one system preamble, one identical
+  final question turn, and naming themselves. Arm 5 joins that list at C5 and is
+  immediately held to the same three.
+
+- **`counting_queries` moved from `tests/test_decay_and_summaries.py` into
+  `tests/conftest.py`.** Two modules use it now. It stays a plain context
+  manager rather than a fixture because it has to wrap the part of a test under
+  scrutiny, not the whole test.
+
+**A correction to C3's summary reader, decided this session.** `load_summaries()`
+now excludes blank rows in the `WHERE`:
+
+```python
+func.btrim(MessageSummary.summary_text, " \t\r\n") != "",
+```
+
+- **Why exclude them at all.** A blank summary is not a cheaper version of the
+  message, it is the message gone. Sending `[summarised]` with nothing after it
+  would drop that ancestor from the prompt while the arm still counted it as
+  covered — the coverage-for-fidelity confound the no-drop-tier rule exists to
+  prevent.
+
+- **Why in the `WHERE` and not in the dict afterwards.** `DISTINCT ON` keeps only
+  the newest row per message. A blank written today would win on recency, become
+  the message's summary, and then be discarded — taking a perfectly good older
+  summary with it and costing full text for a message that had one. Excluded up
+  front, the blank never competes. `test_a_blank_summary_does_not_beat_a_real_older_one`
+  pins this, and it failed exactly that way before the fix.
+
+- **Why the character set is spelled out.** Postgres's `btrim` trims **spaces
+  only** by default. `btrim("  \n  ")` returns `"\n"`, which is not empty, so a
+  newline-only summary sailed straight through the filter. The SQL was
+  well-formed and the query ran — only the whitespace test caught the
+  disagreement about what "blank" means. The empty-string test passed either way.
+
+- This keeps "absent from the map means no summary" as the single definition of
+  the rule, in the one place it already lived, and needs no special case in C4.
+
+- **Written into §8.16 the same session**, alongside two corrections that
+  belonged in the same passage: the ordering bullet said "`id DESC`, **not**
+  `created_at DESC`" where the shipped reader has always ordered by both, and
+  §9's `MessageSummary` annotation still described the reader as most-recent
+  only. §12's "current summary selection rule" open item is now marked resolved
+  — most-recent non-blank, `created_at DESC, id DESC`, model filter optional and
+  off. No schema change anywhere: the exclusion is read-side, and `summary_text`
+  stays `text NOT NULL` with the empty string still legal.
+
+**Three fixes applied to hand-typed `app/` code** (the user asked for them
+directly). `TieredDecay` without its parentheses as the field default — assigns
+the class, so `self.decay.assign(steps)` becomes an unbound call with `steps`
+landing in `self`; it raises, but reads like a problem with `assign`. In the
+reader, `.where(` closed one clause early, making `query` a **tuple** of
+`(select, boolean)` rather than a select. And the `btrim` default above.
+
+**Two design questions raised and answered, neither built.**
+
+- **Linear and exponential decay functions — not worth building.** With
+  `Fidelity` being only `full | summary` there is no dial between the two levels,
+  so every monotonic rule collapses to a single cutoff depth and all three
+  produce identical prompts. They become meaningful only if fidelity becomes
+  *graded* (several summary lengths), which needs `MessageSummary` to hold more
+  than one summary per message per model — a change to locked section 9 for a
+  second experiment the thesis does not need. Section 5's "linear, exponential,
+  custom" is aspirational language written before D5 settled on two levels: the
+  `assign(steps)` interface permits the family, the `Fidelity` type currently
+  does not.
+
+- **A fractional decay (`full_depth = ceil(len(steps)/3)`) — real, but rejected.**
+  Unlike linear/exponential it does produce different prompts: on a 30-ancestor
+  chain, three full versus ten. It was rejected because it reintroduces the very
+  thing D5 avoided by choosing depth over token budget — a deep conversation
+  would get more full text than a shallow one, so arm 4's token cost stops being
+  a property of the strategy and becomes a property of which fixture it ran on,
+  and averaging across fixtures averages things that are not the same
+  measurement. Most of what it offers is available by sweeping
+  `TieredDecay(full_depth=N)`, which keeps every run comparable. Eight lines in
+  `decay.py` and nothing else changes if it ever earns its place.
+
+**Open item raised against section 7 — hyperparameter selection is unspecified.**
+`full_depth` is a constructor argument so the eval can sweep it, and D6's
+`fraction` and `max_promotions` exist for the same reason — which gives arm 4 one
+knob and arm 5 three, against zero for `FullInheritance`, `ParentOnly` and
+`SpanOnly`. Sweeping on the same scenarios the results are reported from means
+the tuned arms got N attempts and the baselines got one, and part of any margin
+is then "we tried five things and kept the winner". The likely answer is a
+tuning/reporting split — hold back roughly 8 of the 20–30 scenarios, sweep there,
+freeze the values, then run all five arms once on the remainder. Cost argues the
+same way: 25 scenarios × 5 arms × 3 repeats is 375 generations, and sweeping five
+tier values across all of them doubles the run where an 8-scenario tuning set
+costs 120. The sweep curve is itself worth reporting — a flat curve from
+`full_depth` 2 to 6 would say the win comes from summarizing at all rather than
+from where the line is drawn. **Not settled; needs a decision before the eval
+harness is built**, and now logged as a §12 open item triggered on exactly
+that, since it decides how the fixtures are split and cannot be retrofitted.
+
+**Next: sitting C5** — ancestor-scoped pgvector retrieval and
+`HierarchicalDecayWithRetrieval`. Decay runs first, then retrieval re-marks some
+`summary` steps back to `full` in place; the query is scoped by the walk's
+ancestor ids and filtered on `model_used`, and the `embed` call is the only
+network call in compose, so it is where the timeout and fallback live.

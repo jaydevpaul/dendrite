@@ -1294,11 +1294,14 @@ one caller that can. A quiet degradation to `ParentOnly` would file one arm's
 numbers under another arm's column — the failure mode most damaging to the
 deliverable, and invisible in the output.
 
-**Summary selection is "most recent", with the model filter deferred — this
-narrows section 9.** Section 9's `MessageSummary` note names the selection rule
-as "most recent for the **active model**". The C3 reader implements most-recent
-only, with no `model_used` filter. Recorded here rather than pivoted silently,
-per the repo rule on locked decisions.
+**Summary selection is "most recent non-blank", with the model filter
+deferred — this narrows section 9.** Section 9's `MessageSummary` note names the
+selection rule as "most recent for the **active model**". The reader implements
+most-recent only, with no `model_used` filter, and additionally excludes rows
+whose `summary_text` is blank. Recorded here rather than pivoted silently, per
+the repo rule on locked decisions. Two narrowings, decided a day apart: the
+deferred model filter below is from C3, the blank-row exclusion further down is
+from C4 (2026-09-06).
 
 The filter is not buildable yet. Nothing writes summaries until Layer D, and
 D11 names model ids for exactly three call sites — generation, embedding and the
@@ -1322,16 +1325,54 @@ Two things make that recoverable rather than absorbed:
 - **The reader takes an optional model argument, defaulting to `None`.** Turning
   the filter on is then a call-site change, not a rewrite of the reader and its
   tests.
-- **Selection orders by `id DESC`, not `created_at DESC`.** Rows written in one
-  transaction share a single `now()`, so `created_at` ties and "most recent"
-  degrades to whatever Postgres returns first. The v7 keys of 8.3 sort in
-  creation order, which makes the id both a deterministic tiebreak and the same
-  answer.
+- **Selection orders by `created_at DESC, id DESC`** — both columns, the
+  timestamp carrying the ordinary case and the id settling ties. `created_at`
+  alone is not enough: rows written in one transaction share a single `now()`,
+  so it ties and "most recent" degrades to whatever Postgres returns first. The
+  v7 keys of 8.3 sort in creation order, which makes the id a deterministic
+  tiebreak and the same answer. *(Corrected 2026-09-06. An earlier version of
+  this bullet read "orders by `id DESC`, **not** `created_at DESC`", which the
+  shipped reader never did — it has ordered by both since C3.)*
 
 *Trigger for closing this:* when Layer D lands summarization and a summarization
 model id enters config, pass it and section 9's rule holds as written.
 Immediately, and ahead of that, if summaries are ever regenerated with a
 different model while section 7's fixtures exist.
+
+**A blank summary is not a candidate at all (decided 2026-09-06, building
+C4).** `load_summaries()` excludes rows whose `summary_text` is empty or
+whitespace-only, in the `WHERE`:
+
+```python
+func.btrim(MessageSummary.summary_text, " \t\r\n") != ""
+```
+
+*Why exclude rather than render it.* A blank summary is not a cheaper version of
+the message, it is the message gone. Sending the `[summarised]` marker with
+nothing after it would drop that ancestor from the prompt while the arm still
+counted it as covered — the coverage-for-fidelity confound D5's no-drop tier
+exists to prevent, arriving through the back door.
+
+*Why in the `WHERE` rather than filtered out of the returned map.* The query
+keeps only the newest row per message. A blank written today would win on
+recency, become that message's summary, and only then be discarded — taking a
+perfectly good older summary with it and costing full text for a message that
+had one. Excluded in the `WHERE`, the blank never competes.
+`test_a_blank_summary_does_not_beat_a_real_older_one` pins this, and failed in
+exactly that way before the fix.
+
+*Why the character set is spelled out.* Postgres's `btrim` trims spaces and
+nothing else by default, so `btrim("  \n  ")` returns `"\n"` and a
+newline-only summary passes an `!= ""` test. The SQL is well-formed and the
+query runs either way; only a whitespace test catches the code quietly
+disagreeing about what "blank" means.
+
+This keeps "absent from the map means no summary" as the single definition of
+the rule, in the one place it already lived, so no strategy needs a special
+case: a blank row degrades exactly like a missing one, through
+`SUMMARY_MISSING`. **No schema change** — `summary_text` stays `text NOT NULL`
+and an empty string remains legal at the database level. The exclusion is a
+read-side rule, not a constraint.
 
 **Deliberately deferred, not overlooked.** `Fidelity` and the decay-function
 protocol belong to C3, which defines them alongside the interface that consumes
@@ -1417,9 +1458,12 @@ CHECK (strategy_override <> 'SpanOnly' OR anchor_start IS NOT NULL)     -- SpanO
 | created_at | timestamptz | NOT NULL, default now() |
 
 No unique constraint — many summaries per message allowed. Selection logic
-("most recent for the active model") lives in code. **The model half of that
-rule is deferred until a summarization model id exists in config — the reader
-selects most-recent only; see 8.16.**
+("most recent for the active model") lives in code. **Narrowed twice, both in
+code and neither in the schema: the model half is deferred until a summarization
+model id exists in config, and a row whose `summary_text` is blank is excluded
+from selection entirely. The reader therefore selects most-recent non-blank; see
+8.16.** An empty string remains legal in this column — the exclusion is a
+read-side rule, not a constraint.
 
 ### MessageEmbedding
 | Column | Type | Notes |
@@ -1622,8 +1666,31 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   /conversations/{id}` with a new `default_strategy` is the user-facing control
   for "compose everything from here on this way". *Trigger: when the chat
   surface can display which strategy produced a reply, and why.*
-- **"Current summary" selection rule** in code (when a message has several
-  summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*
+- ~~**"Current summary" selection rule** in code (when a message has several
+  summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*~~
+  **RESOLVED 2026-09-06** → most-recent non-blank, ordered `created_at DESC, id
+  DESC`, with the `model_used` filter available as an optional argument and off
+  until a summarization model id exists in config. Section 8.16 carries all
+  three parts and why each narrows section 9 without touching the schema.
+- **How the tunable arms get their hyperparameters, and on what data.**
+  Section 7 names the task set, the judge, the metrics and the deliverable, but
+  says nothing about hyperparameter selection. `TieredDecay(full_depth=...)` is
+  a constructor argument so the harness can sweep it, and D6's `fraction` and
+  `max_promotions` exist for the same reason — which leaves arm 4 with one knob
+  and arm 5 with three, against zero for `FullInheritance`, `ParentOnly` and
+  `SpanOnly`. Sweeping on the same scenarios the results are reported from would
+  give the tuned arms N attempts where the baselines get one, and part of any
+  margin would then be "we tried five settings and kept the winner" rather than
+  a finding about context composition. The likely answer is a tuning/reporting
+  split: hold back roughly 8 of the 20–30 scenarios, sweep there, freeze the
+  values, then run all five arms once on the remainder. Cost argues the same
+  way — 25 scenarios x 5 arms x 3 repeats is 375 generations, and sweeping five
+  tier values across all of them doubles the run where an 8-scenario tuning set
+  costs 120. The sweep curve is worth reporting in its own right: if
+  quality-per-token is flat from `full_depth` 2 to 6, the win comes from
+  summarizing at all rather than from where the line is drawn, which is a real
+  result. *Trigger: before the eval harness is built — it decides how the
+  fixtures are split, so it cannot be retrofitted.*
 - **Full failure-mode list** for each context-composition step + its fallback —
   partly answered by 8.15 (D6 fixes the retrieval timeout and its fallback, D7
   fixes how a degradation is recorded and recovered), so what remains is the
