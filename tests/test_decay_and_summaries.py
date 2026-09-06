@@ -11,11 +11,9 @@ the tier reads a step's depth and nothing else, so a test that had to build a
 graph to check it would be testing the walk again.
 """
 
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event
 
 from app.context.base import (
     SUMMARY_MARKER,
@@ -28,6 +26,7 @@ from app.context.base import (
 from app.context.decay import TieredDecay
 from app.services.ancestors import AncestorStep
 from app.services.summary import load_summaries
+from tests.conftest import counting_queries
 from tests.graph_builders import (
     new_conversation,
     new_message,
@@ -45,21 +44,6 @@ def steps_down_to(depth):
     conversation's messages happen to be.
     """
     return [AncestorStep(depth=d, message=None, edge=None) for d in range(1, depth + 1)]
-
-
-@contextmanager
-def counting_queries(engine):
-    """Count the statements actually sent while the block runs."""
-    sent = []
-
-    def record(*_args):
-        sent.append(1)
-
-    event.listen(engine.sync_engine, "before_cursor_execute", record)
-    try:
-        yield sent
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", record)
 
 
 # --- the tier -------------------------------------------------------------
@@ -200,6 +184,51 @@ async def test_the_later_id_breaks_a_timestamp_tie(session):
 
     assert second.id > first.id
     assert summaries == {message.id: "written second"}
+
+
+async def test_a_blank_summary_reads_as_missing(session):
+    """A summary with no text in it is not a cheaper version of the message -
+    it is the message gone. Sending the marker with nothing after it would drop
+    that ancestor while the strategy still counted it as covered, which is
+    exactly the coverage-for-fidelity trade the decay arms are built to avoid.
+    An absent key sends the full text instead."""
+    _, messages = await a_conversation_with_messages(session, count=1)
+    message = messages[0]
+    await new_summary(session, message, summary_text="")
+
+    summaries = await load_summaries(session, [message.id])
+
+    assert summaries == {}
+
+
+async def test_a_whitespace_only_summary_reads_as_missing(session):
+    """Same thing with the emptiness harder to see. A summariser that returns a
+    stray newline has produced nothing, and the check is on the trimmed text so
+    that it says so."""
+    _, messages = await a_conversation_with_messages(session, count=1)
+    message = messages[0]
+    await new_summary(session, message, summary_text="  \n  ")
+
+    summaries = await load_summaries(session, [message.id])
+
+    assert summaries == {}
+
+
+async def test_a_blank_summary_does_not_beat_a_real_older_one(session):
+    """Why blank rows are excluded in the query rather than dropped from the
+    map afterwards. Only the most recent summary per message survives the
+    query, so a blank one written today would win on recency and then be thrown
+    away - taking a perfectly good older summary with it, and costing full text
+    for a message that had one. Excluded up front, the blank never competes."""
+    _, messages = await a_conversation_with_messages(session, count=1)
+    message = messages[0]
+
+    await new_summary(session, message, summary_text="a real summary")
+    await new_summary(session, message, summary_text="")
+
+    summaries = await load_summaries(session, [message.id])
+
+    assert summaries == {message.id: "a real summary"}
 
 
 async def test_only_the_requested_messages_come_back(session):

@@ -1,7 +1,8 @@
 import os
+from contextlib import contextmanager
 
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.models  # noqa: F401 - importing registers every table on Base.metadata
@@ -90,6 +91,25 @@ async def session(engine):
     async with engine.begin() as conn:
         tables = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
         await conn.execute(text(f"truncate {tables} restart identity cascade"))
+
+
+@contextmanager
+def counting_queries(engine):
+    """Count the statements actually sent while the block runs.
+
+    Not a fixture - it wraps the part of a test that is under scrutiny, so it
+    has to be entered inside the test body rather than around the whole of it.
+    """
+    sent = []
+
+    def record(*_args):
+        sent.append(1)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        yield sent
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

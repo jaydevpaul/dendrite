@@ -7,6 +7,9 @@ the model client ride along on the request instead.
 
 from dataclasses import dataclass
 
+from app.context.decay import TieredDecay
+from app.services.summary import load_summaries
+
 from app.context.base import (
     StrategyRequest,
     full_turn,
@@ -14,7 +17,10 @@ from app.context.base import (
     WALK_TRUNCATED,
     ComposedContext,
     SYSTEM_PROMPT,
-    ensure_leading_user_turn
+    ensure_leading_user_turn,
+    DecayFunction,
+    SUMMARY_MISSING,
+    summarised_turn
 )
 
 from app.models._shared import AnyStrategy
@@ -96,11 +102,65 @@ class SpanOnly:
         ) 
 
 
+@dataclass(frozen=True)
+class HierarchicalDecay:
+    """The whole chain, with older ancestors sent as summaries."""
+
+    decay: DecayFunction = TieredDecay()
+    name: AnyStrategy="HierarchicalDecay"
+
+    async def compose(self,request: StrategyRequest):
+        steps = request.walk.steps
+        fidelities = self.decay.assign(steps)
+
+        summaries=await load_summaries(
+            request.session,
+            [
+                step.message.id
+                for step,fidelity in zip(steps,fidelities)
+                if fidelity=="summary"
+            ],
+        )
+
+        messages = []
+        summary_missing = False
+
+        # The walk comes back nearest-first; a prompt reads oldest-first.
+
+        for step,fidelity in zip(reversed(steps),reversed(fidelities)):
+            summary_text = (
+                summaries.get(step.message.id) if  fidelity == "summary" else None
+            )
+
+            if fidelity == "summary" and summary_text is None:
+                # Nothing has summarized this level yet. Sending the full text
+                # costs more and stays correct, which is the right way round.
+                summary_missing=True
+
+            messages.append(
+                full_turn(step.message)
+                if summary_text is None
+                else summarised_turn(step.message,summary_text)
+            )
 
 
+        messages.append(render_question(request.question, request.anchor))
 
+        degradations=[]
 
+        if request.walk.truncated:
+            degradations.append(WALK_TRUNCATED)
 
+        if summary_missing:
+            degradations.append(SUMMARY_MISSING)
+
+        
+        return ComposedContext(
+            system=SYSTEM_PROMPT,
+            messages=ensure_leading_user_turn(messages),
+            strategy_used=self.name,
+            degradations=degradations,
+        )
 
 
 

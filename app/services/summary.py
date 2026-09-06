@@ -7,7 +7,7 @@ side, and it is written so that the absence of that job is not a failure.
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select,func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message_summary import MessageSummary
@@ -35,9 +35,12 @@ async def load_summaries(
     if not ids:
         return {}
 
-    query = (
-        select(MessageSummary.message_id, MessageSummary.summary_text)
-        .where(MessageSummary.message_id.in_(ids))
+    query = select(MessageSummary.message_id, MessageSummary.summary_text).where(
+        MessageSummary.message_id.in_(ids),
+        # btrim defaults to trimming spaces and nothing else, so the set is
+        # spelled out - a summariser that returns a bare newline has produced
+        # nothing, and this is what says so.
+        func.btrim(MessageSummary.summary_text, " \t\r\n") != "",
     )
 
     if model is not None:

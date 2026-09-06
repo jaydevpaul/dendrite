@@ -1,4 +1,4 @@
-"""Context types, the strategy interface, and the three simple strategies.
+"""Context types, the strategy interface, and four of the five strategies.
 
 These run against the real ancestor walk, not a hand-built one: the anchor a
 strategy composes comes off the edge one level up, and that coupling is only
@@ -13,6 +13,8 @@ the results as a difference the experiment cannot explain.
 import pytest
 
 from app.context.base import (
+    SUMMARY_MARKER,
+    SUMMARY_MISSING,
     SYSTEM_PROMPT,
     WALK_TRUNCATED,
     Anchor,
@@ -22,8 +24,10 @@ from app.context.base import (
     ensure_leading_user_turn,
     render_question,
 )
+from app.context.decay import TieredDecay
 from app.context.strategies import (
     FullInheritance,
+    HierarchicalDecay,
     ParentOnly,
     SpanOnly,
     SpanOnlyRequiresAnchor,
@@ -32,6 +36,7 @@ from app.llm.base import PromptMessage
 from app.llm.fake import FakeLLMClient
 from app.models.message import Message
 from app.services.ancestors import walk_ancestors
+from tests.conftest import counting_queries
 from tests.graph_builders import (
     ANCHOR_TEXT,
     PARENT_TEXT,
@@ -40,12 +45,18 @@ from tests.graph_builders import (
     link,
     new_conversation,
     new_message,
+    new_summary,
     new_user,
 )
 
 QUESTION_TEXT = "What does that cost me?"
 
 SIMPLE_STRATEGIES = [FullInheritance(), ParentOnly(), SpanOnly()]
+
+# Every arm that exists so far. The cross-strategy tests at the bottom run
+# against this list, so a fifth arm joins it and immediately has to answer for
+# the things all of them hold constant.
+BUILT_STRATEGIES = [*SIMPLE_STRATEGIES, HierarchicalDecay()]
 
 
 # --- builders -------------------------------------------------------------
@@ -351,6 +362,268 @@ async def test_span_only_never_degrades(session):
     assert context.degradations == []
 
 
+# --- HierarchicalDecay ----------------------------------------------------
+
+
+async def a_deep_branch(session, summarised="older"):
+    """A branch with seven ancestors, deep enough for the default tier to bite.
+
+    Depths run 1 to 7, so under the three-level tier the newest three are sent
+    in full and the oldest four drop to summaries - which makes `ancestors[-3:]`
+    the full ones and `ancestors[:-3]` the summarized ones in every test below.
+
+    `summarised` says which ancestors actually have a summary row. "older" is
+    the ordinary case; "none" is a chain nothing has summarized yet; "all"
+    gives even the full-tier levels one, so a test can check the tier decides
+    what is sent rather than whatever happens to be available.
+    """
+    conversation, question, ancestors = await a_branch(session, trunk_length=6)
+
+    to_summarise = {"older": ancestors[:-3], "none": [], "all": ancestors}[summarised]
+
+    for ancestor in to_summarise:
+        await new_summary(
+            session, ancestor, summary_text=f"a summary of {ancestor.content}"
+        )
+
+    await session.commit()
+    return conversation, question, ancestors
+
+
+def summarised_turns(context):
+    return [
+        turn for turn in context.messages if turn.content.startswith(SUMMARY_MARKER)
+    ]
+
+
+async def test_decay_covers_every_ancestor(session):
+    """Same ancestors as full inheritance, and that is the whole design. If
+    decay reached fewer levels, a saving in tokens could be explained by having
+    sent less of the conversation rather than by summarizing what it sent."""
+    conversation, question, ancestors = await a_deep_branch(session)
+    request = await a_request(session, conversation, question)
+
+    decayed = await HierarchicalDecay().compose(request)
+    full = await FullInheritance().compose(request)
+
+    assert len(decayed.messages) == len(ancestors) + 1
+    assert len(decayed.messages) == len(full.messages)
+
+
+async def test_the_older_levels_are_sent_as_summaries(session):
+    conversation, question, ancestors = await a_deep_branch(session)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert [turn.content for turn in context.messages[:4]] == [
+        f"{SUMMARY_MARKER} a summary of {ancestor.content}"
+        for ancestor in ancestors[:-3]
+    ]
+
+
+async def test_the_newest_levels_are_full_even_when_a_summary_exists(session):
+    """Every ancestor here has a summary, including the three nearest ones. The
+    tier decides what gets sent, not what happens to be in the table."""
+    conversation, question, ancestors = await a_deep_branch(session, summarised="all")
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert [turn.content for turn in context.messages[-4:-1]] == [
+        ancestor.content for ancestor in ancestors[-3:]
+    ]
+
+
+async def test_the_summarised_levels_stay_in_place(session):
+    """Oldest first, in the same order full inheritance sends them. A summary is
+    a shorter version of a turn in position, not a separate excerpt appended
+    somewhere else in the prompt."""
+    conversation, question, ancestors = await a_deep_branch(session)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert summarised_turns(context) == context.messages[:4]
+    assert len(summarised_turns(context)) == len(ancestors) - 3
+
+
+async def test_a_summarised_level_keeps_the_ancestor_role(session):
+    """Decay changes how much of a turn is sent, never who said it. Moving a
+    summary to another voice would invent a speaker who never spoke."""
+    conversation, question, _ = await a_deep_branch(session)
+    request = await a_request(session, conversation, question)
+
+    decayed = await HierarchicalDecay().compose(request)
+    full = await FullInheritance().compose(request)
+
+    assert [turn.role for turn in decayed.messages] == [
+        turn.role for turn in full.messages
+    ]
+
+
+async def test_a_fully_summarised_chain_reports_nothing(session):
+    conversation, question, _ = await a_deep_branch(session)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == []
+
+
+async def test_a_missing_summary_falls_back_to_full_text(session):
+    """Summarizing runs behind the conversation, so a level marked for a summary
+    that has not got one yet is the ordinary state rather than a fault. Full
+    text costs more and stays correct, which is the right way round."""
+    conversation, question, ancestors = await a_deep_branch(session, summarised="none")
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert [turn.content for turn in context.messages[:-1]] == [
+        ancestor.content for ancestor in ancestors
+    ]
+    assert summarised_turns(context) == []
+
+
+async def test_the_missing_summary_is_reported_once_for_the_whole_compose(session):
+    """Four levels wanted a summary and none of them had one, and that is one
+    finding about one composition. Recorded per ancestor it would be a list
+    holding the same name four times, which the evaluation would have to
+    de-duplicate before it could report how often this happens."""
+    conversation, question, _ = await a_deep_branch(session, summarised="none")
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == [SUMMARY_MISSING]
+
+
+async def test_a_partly_summarised_chain_reports_it_once_too(session):
+    """One level short is the same finding as four levels short, and the levels
+    that do have summaries are still sent as summaries."""
+    conversation, question, ancestors = await a_deep_branch(session, summarised="none")
+    await new_summary(session, ancestors[0], summary_text="the oldest, shortened")
+    await session.commit()
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == [SUMMARY_MISSING]
+    assert context.messages[0].content == f"{SUMMARY_MARKER} the oldest, shortened"
+
+
+async def test_it_reports_a_truncated_walk(session):
+    """This arm climbs to the root the same way full inheritance does, so a walk
+    that stopped short really did cut what it sent. Parent-only stays silent
+    about the same cap because the cap changed nothing for it."""
+    conversation, question, _ = await a_deep_branch(session)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question, max_depth=3)
+    )
+
+    assert context.degradations == [WALK_TRUNCATED]
+
+
+async def test_both_degradations_can_fire_at_once(session):
+    """A walk cut short and a level with no summary are separate findings with
+    separate fixes, so both are recorded rather than one standing in for the
+    other."""
+    conversation, question, _ = await a_deep_branch(session, summarised="none")
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question, max_depth=5)
+    )
+
+    assert context.degradations == [WALK_TRUNCATED, SUMMARY_MISSING]
+
+
+async def test_the_decay_function_is_swappable(session):
+    """The tier is handed in rather than written into the strategy. That is what
+    makes this a family of arms instead of one algorithm, and the evaluation
+    sweeps it."""
+    conversation, question, ancestors = await a_deep_branch(session, summarised="all")
+    request = await a_request(session, conversation, question)
+
+    shallow = await HierarchicalDecay(TieredDecay(full_depth=1)).compose(request)
+    default = await HierarchicalDecay().compose(request)
+
+    assert len(summarised_turns(shallow)) == len(ancestors) - 1
+    assert len(summarised_turns(default)) == len(ancestors) - 3
+
+
+async def test_a_chain_inside_the_tier_asks_the_database_nothing(session, engine):
+    """Three ancestors and three full levels, so nothing is marked for
+    summarizing and there is nothing to look up. A query here would be one the
+    user waits for and gets nothing from."""
+    conversation, question, ancestors = await a_branch(session, trunk_length=2)
+    request = await a_request(session, conversation, question)
+
+    with counting_queries(engine) as sent:
+        context = await HierarchicalDecay().compose(request)
+
+    assert sent == []
+    assert context.degradations == []
+    assert [turn.content for turn in context.messages[:-1]] == [
+        ancestor.content for ancestor in ancestors
+    ]
+
+
+async def test_the_whole_chain_costs_one_summary_query(session, engine):
+    """One read covering every summarized level. Looking each one up inside the
+    render loop would be a round trip per level, and this runs while the user is
+    waiting for the first token."""
+    conversation, question, _ = await a_deep_branch(session)
+    request = await a_request(session, conversation, question)
+
+    with counting_queries(engine) as sent:
+        await HierarchicalDecay().compose(request)
+
+    assert len(sent) == 1
+
+
+async def test_decay_on_a_root_question_sends_only_the_question(session):
+    user = await new_user(session)
+    conversation = await new_conversation(session, user)
+    question = await new_message(session, conversation, "user", QUESTION_TEXT)
+    await session.commit()
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.messages == [PromptMessage(role="user", content=QUESTION_TEXT)]
+    assert context.degradations == []
+
+
+async def test_a_truncated_decay_walk_can_still_need_the_placeholder(session):
+    """Stopping the walk early makes the oldest surviving turn arbitrary. A full
+    climb ends on the root, which is always a user message, so this only shows
+    up once the cap has cut the chain."""
+    conversation, question, _ = await a_deep_branch(session)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question, max_depth=1)
+    )
+
+    assert context.messages[0].role == "user"
+
+
+def test_two_decay_strategies_with_the_same_tier_agree():
+    """Frozen, and tuned only through its constructor, so one instance can serve
+    every request the way the other three do."""
+    assert HierarchicalDecay() == HierarchicalDecay(TieredDecay())
+    assert HierarchicalDecay(TieredDecay(full_depth=1)) != HierarchicalDecay()
+
+
 # --- across the strategies: what the experiment holds constant ------------
 
 
@@ -358,7 +631,7 @@ async def test_every_strategy_reports_its_own_name(session):
     conversation, question, _ = await a_branch(session)
     request = await a_request(session, conversation, question)
 
-    for strategy in SIMPLE_STRATEGIES:
+    for strategy in BUILT_STRATEGIES:
         context = await strategy.compose(request)
 
         assert context.strategy_used == strategy.name
@@ -370,7 +643,7 @@ async def test_every_strategy_shares_one_system_preamble(session):
     conversation, question, _ = await a_branch(session)
     request = await a_request(session, conversation, question)
 
-    for strategy in SIMPLE_STRATEGIES:
+    for strategy in BUILT_STRATEGIES:
         assert (await strategy.compose(request)).system == SYSTEM_PROMPT
 
 
@@ -383,7 +656,7 @@ async def test_every_strategy_ends_on_the_identical_question_turn(session):
 
     final_turns = [
         (await strategy.compose(request)).messages[-1]
-        for strategy in SIMPLE_STRATEGIES
+        for strategy in BUILT_STRATEGIES
     ]
 
     assert len(set(final_turns)) == 1
@@ -396,13 +669,16 @@ async def test_the_strategies_differ_only_in_how_many_ancestors_they_send(sessio
 
     counts = {
         strategy.name: len((await strategy.compose(request)).messages) - 1
-        for strategy in SIMPLE_STRATEGIES
+        for strategy in BUILT_STRATEGIES
     }
 
     assert counts == {
         "FullInheritance": len(ancestors),
         "ParentOnly": 2,          # the parent plus the placeholder
         "SpanOnly": 0,
+        # Same ancestors as full inheritance, deliberately. Decay differs in
+        # how much of each one it sends, never in how many it sends.
+        "HierarchicalDecay": len(ancestors),
     }
 
 
