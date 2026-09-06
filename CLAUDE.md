@@ -70,11 +70,8 @@ OpenAI client, eval framework, the graph navigator.
 **All twelve Layer C shape decisions are settled and written up as §8.15
 (D1–D12).** Do not re-litigate them.
 
-Committed through `d273ab3` (C1–C3 and their write-up). **Uncommitted:**
-C4 — `HierarchicalDecay` in `app/context/strategies.py`, the blank-summary
-filter in `app/services/summary.py`, `counting_queries` moved into
-`tests/conftest.py`, and the new tests in `tests/test_context_strategies.py`
-and `tests/test_decay_and_summaries.py`. 250 passing, none of it committed.
+Committed through `2984a1c` — C4 and its write-up. **Working tree clean**,
+250 passing.
 
 ### Running it
 
