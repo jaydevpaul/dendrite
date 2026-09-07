@@ -4,13 +4,17 @@ Deliberately not going through the API. B1's routes are already tested; what
 these tests need is arbitrary graph *shapes*, including ones the API refuses to
 build - a cross-conversation edge, or a strategy override on a continuation.
 
-Every builder flushes but does not commit, so a test can assemble a shape and
-commit it once at the end.
+The small builders flush but do not commit, so a test can assemble a shape and
+commit it once at the end. The two whole-thread builders at the bottom commit
+for themselves, because what they build is a starting point rather than a piece.
 """
 
+from app.core.config import settings
+from app.llm.fake import fake_vector
 from app.models.conversation import Conversation
 from app.models.edge import Edge
 from app.models.message import Message
+from app.models.message_embedding import MessageEmbedding
 from app.models.message_summary import MessageSummary
 from app.models.user import User
 
@@ -105,3 +109,97 @@ async def new_summary(
     session.add(summary)
     await session.flush()
     return summary
+
+
+async def new_embedding(
+    session,
+    message,
+    text=None,
+    model_used=None,
+    created_at=None,
+):
+    """A vector hanging off a message.
+
+    The vector is derived from `text`, which defaults to the message's own
+    content - what a real embedder would have been handed. Pass `text`
+    explicitly when a test needs to control exactly how close two candidates
+    are to the query, rather than relying on the fixture's prose.
+
+    `model_used` defaults to the configured embedding model, so a row written
+    here is one the strategy's own model filter will find. Pass something else
+    to build a row from a different vector space, which retrieval must ignore.
+
+    `created_at` is normally left to the database. Pass it when a test needs
+    one row to be genuinely older than another.
+    """
+    embedding = MessageEmbedding(
+        message_id=message.id,
+        embedding=fake_vector(message.content if text is None else text),
+        model_used=settings.embedding_model if model_used is None else model_used,
+    )
+
+    if created_at is not None:
+        embedding.created_at = created_at
+
+    session.add(embedding)
+    await session.flush()
+    return embedding
+
+
+# The question a branch is opened to ask, and the text the anchor points into.
+QUESTION_TEXT = "What does that cost me?"
+
+
+async def a_question(
+    session,
+    default_strategy="ParentOnly",
+    anchor=SPAN,
+    override=None,
+    trunk_length=3,
+):
+    """A trunk of continuations, an assistant reply, then the user question.
+
+    The reply carries the text the anchor offsets point into, so the last link
+    is a real branch. `anchor=None` makes it a continuation instead, which is
+    the single thing that changes what resolution answers.
+
+    Returns the conversation, the question, and the ancestors oldest-first.
+    """
+    user = await new_user(session)
+    conversation = await new_conversation(
+        session, user, default_strategy=default_strategy
+    )
+    trunk = await chain_of(session, conversation, trunk_length)
+
+    reply = await new_message(session, conversation, "assistant", PARENT_TEXT)
+    await link(session, trunk[-1], reply)
+
+    question = await new_message(session, conversation, "user", QUESTION_TEXT)
+    await link(session, reply, question, anchor=anchor, override=override)
+
+    await session.commit()
+    return conversation, question, [*trunk, reply]
+
+
+async def a_deep_question(session, default_strategy, anchor=None, summarised="older"):
+    """Seven ancestors, deep enough that the three-level tier bites.
+
+    "older" summarizes the four the default tier would send short, which is the
+    ordinary state. "all" gives every level a summary, so a test that shortens
+    the tier sees more summaries rather than more full text sent for want of a
+    row to use.
+    """
+    conversation, question, ancestors = await a_question(
+        session,
+        default_strategy=default_strategy,
+        anchor=anchor,
+        trunk_length=6,
+    )
+
+    for ancestor in {"older": ancestors[:-3], "all": ancestors}[summarised]:
+        await new_summary(
+            session, ancestor, summary_text=f"a summary of {ancestor.content}"
+        )
+
+    await session.commit()
+    return conversation, question, ancestors

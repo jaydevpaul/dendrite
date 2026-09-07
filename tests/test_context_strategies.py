@@ -10,9 +10,13 @@ between them for a reason *other* than which ancestors are sent will show up in
 the results as a difference the experiment cannot explain.
 """
 
+import asyncio
+from dataclasses import dataclass
+
 import pytest
 
 from app.context.base import (
+    EMBEDDING_MISSING,
     SUMMARY_MARKER,
     SUMMARY_MISSING,
     SYSTEM_PROMPT,
@@ -28,12 +32,13 @@ from app.context.decay import TieredDecay
 from app.context.strategies import (
     FullInheritance,
     HierarchicalDecay,
+    HierarchicalDecayWithRetrieval,
     ParentOnly,
     SpanOnly,
     SpanOnlyRequiresAnchor,
 )
 from app.llm.base import PromptMessage
-from app.llm.fake import FakeLLMClient
+from app.llm.fake import FakeLLMClient, fake_vector
 from app.models.message import Message
 from app.services.ancestors import walk_ancestors
 from tests.conftest import counting_queries
@@ -44,6 +49,7 @@ from tests.graph_builders import (
     chain_of,
     link,
     new_conversation,
+    new_embedding,
     new_message,
     new_summary,
     new_user,
@@ -56,7 +62,11 @@ SIMPLE_STRATEGIES = [FullInheritance(), ParentOnly(), SpanOnly()]
 # Every arm that exists so far. The cross-strategy tests at the bottom run
 # against this list, so a fifth arm joins it and immediately has to answer for
 # the things all of them hold constant.
-BUILT_STRATEGIES = [*SIMPLE_STRATEGIES, HierarchicalDecay()]
+BUILT_STRATEGIES = [
+    *SIMPLE_STRATEGIES,
+    HierarchicalDecay(),
+    HierarchicalDecayWithRetrieval(),
+]
 
 
 # --- builders -------------------------------------------------------------
@@ -87,13 +97,18 @@ async def a_branch(session, trunk_length=3, anchor=SPAN):
     return conversation, question, [*trunk, reply]
 
 
-async def a_request(session, conversation, question, max_depth=200):
-    """What the composer will assemble: walk the chain, hand it to a strategy."""
+async def a_request(session, conversation, question, max_depth=200, llm=None):
+    """What the composer will assemble: walk the chain, hand it to a strategy.
+
+    Only the retrieval arm touches `llm` during composition, and only to embed
+    the query - so the default client is fine everywhere else, and a test that
+    wants a failing or slow embedder passes its own.
+    """
     walk = await walk_ancestors(session, conversation, question.id, max_depth=max_depth)
 
     return StrategyRequest(
         session=session,
-        llm=FakeLLMClient(),
+        llm=FakeLLMClient() if llm is None else llm,
         question=question,
         anchor=anchor_from_walk(walk),
         walk=walk,
@@ -624,6 +639,506 @@ def test_two_decay_strategies_with_the_same_tier_agree():
     assert HierarchicalDecay(TieredDecay(full_depth=1)) != HierarchicalDecay()
 
 
+# --- HierarchicalDecayWithRetrieval ---------------------------------------
+
+# The four levels that fall outside the default tier, oldest first. Written so
+# the ranking has a real answer rather than an arbitrary one: index 1 shares
+# three words with the question and its highlight, index 3 shares one, and the
+# other two share none. With four candidates a third rounds up to two, so
+# indexes 1 and 3 are the two that should come back full.
+OLDER_TEXTS = [
+    "HNSW builds a navigable small world graph over the vectors.",
+    "Recall and speed trade against each other in every vector index.",
+    "Autovacuum on a write-heavy table needs its own settings.",
+    "Latency and speed are not the same measurement.",
+]
+
+NEWER_TEXTS = [
+    "The deployment pipeline runs on a self-hosted runner.",
+    "Continuous integration caches the wheel build between jobs.",
+]
+
+
+@dataclass
+class SlowEmbedClient(FakeLLMClient):
+    """An embedder that takes its time. Nothing else about the fake changes -
+    generation still works, because a slow embedding service is not a broken
+    model."""
+
+    embed_delay: float = 0.0
+
+    async def embed(self, text: str) -> list[float]:
+        self.embed_calls.append(text)
+        await asyncio.sleep(self.embed_delay)
+        return fake_vector(text)
+
+
+async def a_retrieval_branch(
+    session, summarised="older", embedded="older", anchor=SPAN
+):
+    """A seven-ancestor branch whose older levels have distinguishable text.
+
+    `a_deep_branch` names its levels m0 to m5, which is fine for counting turns
+    and useless for ranking them - every candidate would be equally far from the
+    question and the winner would be whichever one the plan emitted first. These
+    six carry real sentences instead, so "the nearest two" is a fact about the
+    text rather than an accident.
+
+    Depths run 1 to 7, so the newest three are full under the default tier and
+    `ancestors[:4]` are the summarized ones - which are also the candidates.
+    """
+    user = await new_user(session)
+    conversation = await new_conversation(session, user)
+
+    trunk = []
+    for index, text in enumerate([*OLDER_TEXTS, *NEWER_TEXTS]):
+        role = "assistant" if index % 2 else "user"
+        message = await new_message(session, conversation, role, text)
+        if trunk:
+            await link(session, trunk[-1], message)
+        trunk.append(message)
+
+    reply = await new_message(session, conversation, "assistant", PARENT_TEXT)
+    await link(session, trunk[-1], reply)
+
+    question = await new_message(session, conversation, "user", QUESTION_TEXT)
+    await link(session, reply, question, anchor=anchor)
+
+    ancestors = [*trunk, reply]
+    older = ancestors[:4]
+
+    for ancestor in {"older": older, "none": [], "all": ancestors}[summarised]:
+        await new_summary(
+            session, ancestor, summary_text=f"a summary of {ancestor.content}"
+        )
+
+    for ancestor in {"older": older, "none": []}[embedded]:
+        await new_embedding(session, ancestor)
+
+    await session.commit()
+    return conversation, question, ancestors
+
+
+async def test_retrieval_promotes_the_nearest_summarised_levels(session):
+    """Two of the four summarized levels come back in full, and they are the two
+    whose text actually relates to what was asked."""
+    conversation, question, ancestors = await a_retrieval_branch(session)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert [turn.content for turn in context.messages[:4]] == [
+        f"{SUMMARY_MARKER} a summary of {ancestors[0].content}",
+        ancestors[1].content,
+        f"{SUMMARY_MARKER} a summary of {ancestors[2].content}",
+        ancestors[3].content,
+    ]
+
+
+async def test_a_promoted_level_stays_where_it_was(session):
+    """In place, not appended as a block of relevant excerpts at the end.
+    Appending would send the promoted message twice - once shortened in
+    position and again in full out of order - and the metric is quality per
+    token, so paying twice for one message is measured directly."""
+    conversation, question, ancestors = await a_retrieval_branch(session)
+    request = await a_request(session, conversation, question)
+
+    retrieved = await HierarchicalDecayWithRetrieval().compose(request)
+    decayed = await HierarchicalDecay().compose(request)
+
+    assert len(retrieved.messages) == len(decayed.messages)
+    assert len(retrieved.messages) == len(ancestors) + 1
+    assert [turn.role for turn in retrieved.messages] == [
+        turn.role for turn in decayed.messages
+    ]
+
+
+async def test_retrieval_cannot_undo_the_full_fidelity_tier(session):
+    """It only ever looks at levels decay marked for summarizing, so the nearest
+    three are not candidates and cannot be affected by what the ranking says."""
+    conversation, question, ancestors = await a_retrieval_branch(session)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert [turn.content for turn in context.messages[-4:-1]] == [
+        ancestor.content for ancestor in ancestors[-3:]
+    ]
+
+
+async def test_two_thirds_of_the_summaries_survive_promotion(session):
+    """Four candidates, so two stay summarized. Promoting all of them would make
+    this arm byte-identical to full inheritance, and the comparison would be
+    reporting five arms while running four."""
+    conversation, question, _ = await a_retrieval_branch(session)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert len(summarised_turns(context)) == 2
+
+
+async def test_a_chain_inside_the_tier_retrieves_nothing(session, engine):
+    """Three ancestors, all sent in full, so there is nothing that could be
+    promoted. No embedding call and no query - the embedding call is the one
+    piece of network in the whole composition, and this is a request that would
+    pay for it and get nothing."""
+    conversation, question, ancestors = await a_branch(session, trunk_length=2)
+    llm = FakeLLMClient()
+    request = await a_request(session, conversation, question, llm=llm)
+
+    with counting_queries(engine) as sent:
+        context = await HierarchicalDecayWithRetrieval().compose(request)
+
+    assert sent == []
+    assert llm.embed_calls == []
+    assert context.degradations == []
+    assert [turn.content for turn in context.messages[:-1]] == [
+        ancestor.content for ancestor in ancestors
+    ]
+
+
+async def test_the_query_is_the_question_and_the_highlight(session):
+    """What the user asked, plus the passage they highlighted. The highlight is
+    what the branch is about, and on a short question it carries most of the
+    meaning there is to match on."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    llm = FakeLLMClient()
+
+    await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert len(llm.embed_calls) == 1
+    assert QUESTION_TEXT in llm.embed_calls[0]
+    assert ANCHOR_TEXT in llm.embed_calls[0]
+
+
+async def test_a_continuation_queries_on_the_question_alone(session):
+    """A continuation has no highlight, and that is ordinary rather than an
+    error - there is simply less to match on."""
+    conversation, question, _ = await a_retrieval_branch(session, anchor=None)
+    llm = FakeLLMClient()
+
+    await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert llm.embed_calls == [QUESTION_TEXT]
+
+
+# --- when the embeddings are not there ------------------------------------
+
+
+async def test_a_candidate_with_no_embedding_is_reported(session):
+    """Nothing populates the embedding table yet, and the honest record of that
+    is a degradation rather than silence: retrieval ran, named itself, and
+    produced a prompt identical to plain decay's."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, embedded="none"
+    )
+    await new_embedding(session, ancestors[1])
+    await session.commit()
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == [EMBEDDING_MISSING]
+    assert context.strategy_used == "HierarchicalDecayWithRetrieval"
+
+
+async def test_partial_coverage_still_promotes_what_it_found(session):
+    """Three of four embedded is not a reason to throw the ranking away.
+    Retrieval genuinely ran, and falling back to plain decay here would discard
+    real work over a level the embedder has not reached yet."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, embedded="none"
+    )
+    for ancestor in ancestors[1:4]:
+        await new_embedding(session, ancestor)
+    await session.commit()
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == [EMBEDDING_MISSING]
+    assert [turn.content for turn in context.messages[:4]] == [
+        f"{SUMMARY_MARKER} a summary of {ancestors[0].content}",
+        ancestors[1].content,
+        f"{SUMMARY_MARKER} a summary of {ancestors[2].content}",
+        ancestors[3].content,
+    ]
+
+
+async def test_a_fully_embedded_chain_reports_nothing(session):
+    conversation, question, _ = await a_retrieval_branch(session)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert context.degradations == []
+
+
+async def test_the_missing_embedding_has_its_own_name(session):
+    """A summariser backlog and an embedder backlog are different jobs with
+    different fixes, and plain decay can report the first one too - so sharing
+    a name would leave this arm's rate unable to say which was behind it."""
+    assert EMBEDDING_MISSING != SUMMARY_MISSING
+
+
+async def test_nothing_summarised_means_nothing_to_promote(session):
+    """Every level marked for a summary went out in full instead, so there is
+    nothing left for retrieval to promote and it does not go looking. The
+    summariser backlog is already reported, which is the finding here."""
+    conversation, question, _ = await a_retrieval_branch(
+        session, summarised="none", embedded="none"
+    )
+    llm = FakeLLMClient()
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert llm.embed_calls == []
+    assert context.degradations == [SUMMARY_MISSING]
+    assert context.strategy_used == "HierarchicalDecayWithRetrieval"
+
+
+async def test_a_level_with_no_summary_is_not_a_candidate(session):
+    """It is already being sent in full, so promoting it would buy nothing while
+    using up one of the two promotion slots."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, summarised="none", embedded="older"
+    )
+    for ancestor in ancestors[:2]:
+        await new_summary(
+            session, ancestor, summary_text=f"a summary of {ancestor.content}"
+        )
+    await session.commit()
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    # Two candidates now, so a third rounds up to one promotion - and it goes to
+    # the one of the two that the question is actually about.
+    assert [turn.content for turn in context.messages[:4]] == [
+        f"{SUMMARY_MARKER} a summary of {ancestors[0].content}",
+        ancestors[1].content,
+        ancestors[2].content,
+        ancestors[3].content,
+    ]
+    assert context.degradations == [SUMMARY_MISSING]
+
+
+# --- when the embedding service is down -----------------------------------
+
+
+async def test_a_failed_embedding_falls_back_to_plain_decay(session):
+    """The one network call inside composition, so this is where the fallback
+    lives. What gets recorded is plain decay, because plain decay is what
+    actually ran - and comparing that against the arm the harness asked for is
+    how a degraded run is spotted afterwards."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    llm = FakeLLMClient(fail_on_embed=True)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert context.strategy_used == "HierarchicalDecay"
+    assert context.degradations == []
+    assert len(summarised_turns(context)) == 4
+
+
+async def test_a_slow_embedding_falls_back_the_same_way(session):
+    """Composition has a second or two before the first token, so an embedding
+    service that is up but not answering has to be treated as one that is down.
+    Waiting for it would spend the whole budget on the optional half."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    llm = SlowEmbedClient(embed_delay=0.5)
+
+    context = await HierarchicalDecayWithRetrieval(timeout_seconds=0.01).compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert context.strategy_used == "HierarchicalDecay"
+    assert context.degradations == []
+
+
+async def test_a_failed_embedding_skips_the_ranking_query(session, engine):
+    """No vector, nothing to rank. The summaries were already read, so the
+    fallback costs the one query plain decay would have cost anyway."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    llm = FakeLLMClient(fail_on_embed=True)
+    request = await a_request(session, conversation, question, llm=llm)
+
+    with counting_queries(engine) as sent:
+        await HierarchicalDecayWithRetrieval().compose(request)
+
+    assert len(sent) == 1
+
+
+async def test_a_fallback_still_reports_the_summariser_backlog(session):
+    """The embedding failure is recorded by the strategy name rather than by a
+    degradation, so the other findings still have to come through. Three levels
+    have summaries and one does not, so the embed call happens, fails, and the
+    missing summary is reported anyway."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, summarised="none", embedded="none"
+    )
+    for ancestor in ancestors[:3]:
+        await new_summary(
+            session, ancestor, summary_text=f"a summary of {ancestor.content}"
+        )
+    await session.commit()
+    llm = FakeLLMClient(fail_on_embed=True)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, llm=llm)
+    )
+
+    assert llm.embed_calls != []
+    assert context.strategy_used == "HierarchicalDecay"
+    assert context.degradations == [SUMMARY_MISSING]
+
+
+# --- cost, tuning and shape -----------------------------------------------
+
+
+async def test_the_whole_chain_costs_two_queries_and_one_embedding(session, engine):
+    """One read for the summaries and one for the ranking, plus the single
+    embedding call. Anything per-level here would be a round trip per ancestor
+    while the user waits for the first token."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    llm = FakeLLMClient()
+    request = await a_request(session, conversation, question, llm=llm)
+
+    with counting_queries(engine) as sent:
+        await HierarchicalDecayWithRetrieval().compose(request)
+
+    assert len(sent) == 2
+    assert len(llm.embed_calls) == 1
+
+
+async def test_the_fraction_is_tunable(session):
+    """Both knobs are constructor arguments so the evaluation can sweep them."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    request = await a_request(session, conversation, question)
+
+    generous = await HierarchicalDecayWithRetrieval(fraction=1.0).compose(request)
+    default = await HierarchicalDecayWithRetrieval().compose(request)
+
+    assert len(summarised_turns(generous)) == 0
+    assert len(summarised_turns(default)) == 2
+
+
+async def test_the_promotion_cap_is_tunable(session):
+    conversation, question, _ = await a_retrieval_branch(session)
+    request = await a_request(session, conversation, question)
+
+    capped = await HierarchicalDecayWithRetrieval(
+        fraction=1.0, max_promotions=1
+    ).compose(request)
+
+    assert len(summarised_turns(capped)) == 3
+
+
+async def test_the_decay_function_is_swappable_here_too(session):
+    """Declared before the name, so the positional form sets the tier. The other
+    way round it would land in `name` with nothing raising, and the wrong string
+    would surface much later in the recorded strategy."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, summarised="all", embedded="none"
+    )
+
+    shallow = HierarchicalDecayWithRetrieval(TieredDecay(full_depth=1))
+
+    assert shallow.decay == TieredDecay(full_depth=1)
+    assert shallow.name == "HierarchicalDecayWithRetrieval"
+
+    context = await shallow.compose(await a_request(session, conversation, question))
+
+    # Six levels marked for a summary, a third of them promoted - except that
+    # none of them are embedded, so all six stay summarized.
+    assert len(summarised_turns(context)) == len(ancestors) - 1
+
+
+async def test_it_reports_a_truncated_walk(session):
+    """This arm climbs to the root, so a walk that stopped short really did cut
+    what it sent."""
+    conversation, question, _ = await a_retrieval_branch(session)
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, max_depth=3)
+    )
+
+    assert WALK_TRUNCATED in context.degradations
+
+
+async def test_all_three_degradations_can_fire_at_once(session):
+    """A walk cut short, a level with no summary and a candidate with no vector
+    are three separate findings with three separate fixes, so all three are
+    recorded rather than one standing in for the others."""
+    conversation, question, ancestors = await a_retrieval_branch(
+        session, summarised="none", embedded="none"
+    )
+    await new_summary(session, ancestors[3], summary_text="the fourth, shortened")
+    await new_summary(session, ancestors[2], summary_text="the third, shortened")
+    await new_embedding(session, ancestors[3])
+    await session.commit()
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question, max_depth=6)
+    )
+
+    assert context.degradations == [WALK_TRUNCATED, SUMMARY_MISSING, EMBEDDING_MISSING]
+
+
+async def test_composing_twice_gives_the_same_prompt(session):
+    """The ranking has to be a function of the data, not of the plan. Each
+    scenario is run several times and averaged, so variation here would land in
+    that average looking like model variance."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    request = await a_request(session, conversation, question)
+
+    first = await HierarchicalDecayWithRetrieval().compose(request)
+    second = await HierarchicalDecayWithRetrieval().compose(request)
+
+    assert first.messages == second.messages
+
+
+def test_two_retrieval_strategies_with_the_same_settings_agree():
+    assert HierarchicalDecayWithRetrieval() == HierarchicalDecayWithRetrieval(
+        TieredDecay()
+    )
+    assert HierarchicalDecayWithRetrieval(fraction=0.5) != (
+        HierarchicalDecayWithRetrieval()
+    )
+
+
+def test_the_tuning_arguments_are_validated():
+    """A fraction of zero promotes nothing and quietly turns this arm into the
+    one next to it in the comparison."""
+    with pytest.raises(ValueError):
+        HierarchicalDecayWithRetrieval(fraction=0)
+
+    with pytest.raises(ValueError):
+        HierarchicalDecayWithRetrieval(fraction=1.5)
+
+    with pytest.raises(ValueError):
+        HierarchicalDecayWithRetrieval(max_promotions=0)
+
+    with pytest.raises(ValueError):
+        HierarchicalDecayWithRetrieval(timeout_seconds=0)
+
+
 # --- across the strategies: what the experiment holds constant ------------
 
 
@@ -679,6 +1194,9 @@ async def test_the_strategies_differ_only_in_how_many_ancestors_they_send(sessio
         # Same ancestors as full inheritance, deliberately. Decay differs in
         # how much of each one it sends, never in how many it sends.
         "HierarchicalDecay": len(ancestors),
+        # And retrieval changes which of them are sent in full, never how many
+        # turns there are - the whole point of promoting in place.
+        "HierarchicalDecayWithRetrieval": len(ancestors),
     }
 
 

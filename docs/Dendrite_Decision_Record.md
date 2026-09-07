@@ -2,7 +2,7 @@
 type: project-decision-record
 project: Dendrite
 status: Phase 2 — data layer fully locked; ready for implementation
-updated: 2026-09-01
+updated: 2026-09-07
 ---
 
 # Dendrite — Complete Decision Record
@@ -1081,9 +1081,22 @@ The degradation list lives in the in-memory compose result, goes out on the SSE
 `done` event, and is logged. 8.13's `source` is handled the same way.
 
 **D8 — The completion write sets `updated_at` explicitly. (Refines 8.14.)**
-`message.updated_at = message.created_at`, in the same UPDATE that writes
+`updated_at` is set back to `created_at` in the same UPDATE that writes
 `content`. An explicit value wins over `onupdate`, which only supplies a default
 when the column is absent from the SET clause.
+
+*(Mechanism corrected 2026-09-07, building C7. This bullet read
+`message.updated_at = message.created_at` — an ORM attribute assignment — and
+that does not work. The two columns are already equal from the insert, so the
+assignment is not a **change**: the unit of work sees no dirty attribute, leaves
+the column out of the SET clause, and `onupdate` then supplies `now()` after
+all. The rule in the sentence above is right; only an assignment that actually
+reaches the SET clause invokes it. The shipped write is therefore a statement
+naming both columns —
+`update(Message).values(content=..., updated_at=Message.created_at)` — which
+cannot be optimised away and needs no round trip to read `created_at` first.
+Caught by a test; a passing test would have shipped a timestamp ~40ms out and
+a permanently untrustworthy "was edited" signal.)*
 
 8.14 states that section 9's "(moves only on edit)" stays true as written under
 buffer-and-write-once. It does not, quite: the model carries
@@ -1118,6 +1131,17 @@ the request's `SessionDep`. The stream body runs inside the `StreamingResponse`
 generator, after the handler has returned, and whether a `yield`-dependency
 session is still usable there depends on framework teardown ordering — not
 something to depend on.
+
+*(Narrowed 2026-09-07, building C7 and C8: the factory is **injected**, not
+imported. `stream_generation()` takes it as an argument defaulting to
+`async_session_factory`, and the route gets it from a `get_session_factory`
+dependency. Production behaviour is exactly as written above. The reason is that
+`async_session_factory` is bound to the engine built from `settings.database_url`
+— the dev database — so a route or service test could not otherwise see the one
+write that matters: the reply would land in `dendrite` while the test read
+`dendrite_test_<pid>`, and the assertion would fail for a reason unrelated to
+the code. Same seam as `get_session`, one step further out: a factory rather
+than a session, because the work outlives the request.)*
 
 A failure writes the `Generation` row with **null** token counts and leaves
 `content = ''`. Section 7 already anticipates these rows ("failed Generations
@@ -1185,6 +1209,24 @@ needed; and with reasoning hidden there is a pause between `start` and the first
 
 Explicitly **not** a provider registry (section 13): `base_url` and `model` are
 config values, with no routing logic and no per-request vendor choice.
+
+**An eighth key, `llm_client`, added 2026-09-07 while building C8.**
+`llm_client: Literal["fake", "openai"] = "fake"`, and `get_llm()` branches on
+it. This is a config-driven branch where the paragraph above says there is none,
+so it is recorded rather than slipped in.
+
+Why it is not the anti-pattern section 13 warns against: there is no routing, no
+per-request choice and no vendor plurality. `"fake"` is not a vendor — it is
+`FakeLLMClient`, the null implementation 8.8 already names as a reason for the
+seam existing at all. The branch has exactly two arms and one of them is a test
+double, so nothing here is speculative infrastructure for a second provider.
+
+Why a key rather than inferring it from whether `llm_api_key` is set — the
+obvious alternative, and it was rejected: a deployment that lost its key would
+then carry on serving convincing fake replies, with nothing in the response
+saying so. Failure has to be loud. The default is `"fake"` because C9 does not
+exist yet, and it stays useful afterwards: frontend slice 3 can be driven end to
+end with no key and no spend, which is the same argument that put C9 last.
 
 **D12 — `generate` yields typed events; token counts come from the provider.**
 The stream yields `TextDelta` zero or more times and finishes with exactly one
@@ -1294,6 +1336,15 @@ one caller that can. A quiet degradation to `ParentOnly` would file one arm's
 numbers under another arm's column — the failure mode most damaging to the
 deliverable, and invisible in the output.
 
+*(Stronger reason found 2026-09-07, deciding what `compose_context()` does with
+the exception. It is not only resolution's rules: section 9's
+`ck_edge_span_only_needs_anchor` will not **store** a `SpanOnly` override on an
+unanchored edge, so the row the walk would have to read cannot exist. Resolution
+can therefore only answer `SpanOnly` for an anchored depth-1 edge, and that is
+the same edge the anchor is read from. The state is forbidden by a constraint,
+not merely improbable — which is what let C6 leave the exception uncaught. See
+8.17.)*
+
 **Summary selection is "most recent non-blank", with the model filter
 deferred — this narrows section 9.** Section 9's `MessageSummary` note names the
 selection rule as "most recent for the **active model**". The reader implements
@@ -1378,6 +1429,129 @@ read-side rule, not a constraint.
 protocol belong to C3, which defines them alongside the interface that consumes
 them; the name→strategy registry belongs to C6, which is where dispatch lives.
 C2 shipped neither, per the repo's one-layer-at-a-time rule.
+
+---
+### 8.17 Layer C build decisions — compose, generate, stream (decided 2026-09-07)
+
+Taken while building C6, C7 and C8, when 8.15 was silent on them. Recorded for
+the same reason as 8.16: the code now embodies these, so the spec should say
+them rather than leave them to be re-derived. None touches a LOCKED item — no
+column, no index, no migration, no change to section 5's five strategies or
+section 6's topology. Three of them do narrow 8.15, and those narrowings are
+written at D8, D9 and D11 rather than here.
+
+**`compose_context()` lets `SpanOnlyRequiresAnchor` escape.** It is not caught
+and there is no fallback arm. The alternative was a degradation — compose
+`ParentOnly` instead and record `ParentOnly` with a degradation name — which
+would have been honest rather than the invisible mis-filing 8.16 rejects, since
+both the record and the degradation list would say what happened.
+
+It was rejected because the state cannot occur. The reason is the constraint,
+not just resolution's rules: `ck_edge_span_only_needs_anchor` will not store a
+`SpanOnly` override on an unanchored edge, so resolution can only answer
+`SpanOnly` for an anchored depth-1 edge — and that is the same edge
+`anchor_from_walk` reads the anchor off. The one remaining gap, a `max_depth` of
+0 leaving the walk empty while resolution still says `SpanOnly`, is closed by
+`resolve_strategy`'s own `max_depth < 1` guard. A fallback would therefore be
+code that can never run except in a test that fakes an impossible state, and it
+would convert a broken invariant into a one-line log. Compose runs before the
+`StreamingResponse` is returned (D10), so an escape surfaces as a failed request
+with no blank row and no `Generation` row to clean up.
+
+**Dispatch is a dict, and its own correctness is checked at import.** Two
+checks, in the module body of `app/context/compose.py`: the keys must equal
+`ALL_STRATEGIES`, and each instance's `name` must equal the key it sits under.
+
+The second is the one worth having. The key is what resolution answered and the
+instance is what stamps `ComposedContext.strategy_used`, so those are two
+sources for one fact — and a strategy built with its constructor arguments in
+the wrong order carries a tuning object in `name` and raises nothing, which is a
+trap that has already shipped once in this codebase. Failing at import is also
+the only place a missing key can fail early; otherwise the omitted arm breaks
+the first time a real conversation resolves to it.
+
+**Composition is returned as a pair, not folded into `ComposedContext`.**
+`Composition` is a frozen dataclass holding `context` and `resolution`. D10's
+`start` event needs 8.13's `source`, and no strategy can supply it — a `source`
+field on the context would be a hole every arm leaves empty, and `as_payload()`
+has to stay exactly `system` + `messages` (8.16).
+
+**No forced-strategy argument on `compose_context()`.** Section 7's harness
+names arms directly (8.16), so it does not come through here; inventing its
+signature before it exists is the failure the working rules exist to prevent.
+It is also the only thing that would make a span-less `SpanOnly` reachable, so
+leaving it out is what keeps the decision above true rather than merely likely.
+The dispatch table is a module constant and `strategies` is a keyword argument
+defaulting to it, so a swept configuration can be handed in without editing the
+module.
+
+**Compose looks the starting message up itself, and that is three lookups.**
+`resolve_strategy` and `walk_ancestors` each re-fetch it for their own
+`MessageNotFound`, and `StrategyRequest.question` needs the row. The cheap
+existence check runs first, so a bad id fails before two recursive CTEs do.
+Threading a loaded `Message` through B2's signatures to save two single-row
+primary-key lookups is not worth it against 8.6's 1–2s budget, and it would cost
+the property that no walk can be reached without the ownership loader having
+run (8.13).
+
+**Generation is two calls, not one generator.** `start_generation()` composes,
+inserts the blank row and commits; `stream_generation()` is the async generator.
+
+Forced by D10: once a `StreamingResponse` is returned the status line is on the
+wire, so a 404 or a 422 is no longer expressible. A single generator would not
+run its body until the first iteration, which is after the handler returned —
+every refusal would arrive as an `error` frame on a 200. The split also matches
+what the two halves need: the first uses the request's session, the second
+cannot (D9).
+
+**The user-message guard is in the service, not the route.**
+`start_generation()` raises `NotAUserMessage`, which the route turns into a 422.
+It belongs here because this is the thing that *creates* the blank assistant
+row, so no caller can compose from one — including section 7's harness, which
+never goes through a route. Replying to a reply is precisely how the D2 mistake
+gets made, and its failure mode is silent: every branch resolves to the
+conversation default instead of `SpanOnly`.
+
+**A mid-stream failure is logged in full and reported generically.** The
+`error` frame carries a fixed string; the exception goes to
+`logging.getLogger(__name__)` — the first logging in `app/`, which also gives
+D7's "and is logged" somewhere to land. Provider error text carries request ids
+and account details and this frame is browser-facing. A stream that ends with no
+`Completed` at all is treated identically: there is no reply and nothing to
+count, so it records the same failed `Generation` row.
+
+**`model_used` on a failed row is `settings.generation_model`.** The column is
+NOT NULL and the provider never got as far as reporting one, so the configured
+name is the best answer available. On success the provider's own value wins,
+same rule as the token counts (D12).
+
+**`conversation.updated_at` moves at the blank insert.** Same place
+`create_message` bumps it, and a reply landing in a conversation is a change the
+list ordering should see. Not in the completion write, which runs in another
+session and would have to re-load the conversation to do it.
+
+**The `start` event announces the arm that actually ran.** D10 lists `strategy`
+and `source`; `strategy` is `context.strategy_used`, not
+`resolution.strategy`. A client is then never shown a strategy the stored
+`Generation` row contradicts, which is the same rule D7 applies to the column.
+The cost is that on a degraded run `source` explains where the *resolved* answer
+came from while `strategy` names a different arm — `degradations` on `done` is
+what reconciles them. A fourth field carrying both was considered and rejected:
+the client would have to choose one to display anyway, and the one it should
+display is what ran.
+
+**SSE framing lives in one function.** `app/api/sse.py` holds `frame(event,
+data)` and nothing else in the app writes a `data:` line. That is what makes
+D10's JSON-encoding rule structural rather than a habit — there is one place for
+it to be wrong.
+
+**Two response headers, chosen not specified.** `Cache-Control: no-cache`
+because a reply is generated once for one request and there is nothing to
+re-serve. `X-Accel-Buffering: no` because nginx buffers a proxied response by
+default, which holds every chunk until the reply is finished; the stream still
+works and arrives all at once, so the failure reads as a very slow model rather
+than as a misconfigured proxy. It is inert today — there is no nginx in front of
+uvicorn — and set now because it is unfindable later.
 
 ---
 

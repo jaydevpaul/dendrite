@@ -2,7 +2,7 @@ from uuid import UUID
 from datetime import datetime
 from typing import Literal,Annotated,List
 
-from pydantic import StringConstraints,Field, BaseModel, model_validator, ConfigDict
+from pydantic import StringConstraints,Field, BaseModel, model_validator, ConfigDict, computed_field
 from app.models._shared import AnyStrategy
 
 Role = Literal["user","assistant"]
@@ -62,6 +62,13 @@ class MessageOut(BaseModel):
     content: str
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def pending(self) -> bool:
+        """Whether a reply is being streamed into this row."""
+        return self.role == "assistant" and self.content == ""
+
 
 class EdgeOut(BaseModel):
     model_config= ConfigDict(from_attributes=True)

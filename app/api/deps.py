@@ -1,14 +1,38 @@
 from typing import Annotated
 
 from fastapi import Cookie,HTTPException,Depends,status
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.db import get_session
+
+from app.core.db import get_session,async_session_factory
 from app.core.config import settings
 from app.core.security import decode_access_token
 from app.models.user import User
 
+from app.llm.base import LLMClient
+from app.llm.fake import FakeLLMClient
+
 SessionDep=Annotated[AsyncSession,Depends(get_session)]
+
+def get_session_factory():
+    """Sessions for work that outlives the request."""
+
+    return async_session_factory
+
+SessionFactoryDep = Annotated[
+    async_sessionmaker[AsyncSession],Depends(get_session_factory)
+]
+
+def get_llm():
+    """The model client for this request."""
+
+    if settings.llm_client =="fake":
+        return FakeLLMClient()
+
+    raise NotImplementedError("The reak client is not built yet")
+
+LLMDep= Annotated[LLMClient, Depends(get_llm)]
+
 
 # Request rejection Msg common for every type of rejection
 CREDENTIALS_ERROR =HTTPException(

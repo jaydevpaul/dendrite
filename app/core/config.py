@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
 
+    llm_client: Literal["fake", "openai"] = "fake"
+
     generation_model: str = "gpt-5.6-luna"
     generation_effort: Literal["none", "low", "medium", "high", "max"] = "low"
     judge_model: str = "gpt-5.6-terra"          # section 7's judge

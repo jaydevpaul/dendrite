@@ -93,6 +93,22 @@ async def session(engine):
         await conn.execute(text(f"truncate {tables} restart identity cascade"))
 
 
+@pytest_asyncio.fixture(loop_scope="session")
+async def session_factory(engine):
+    """Sessions on the test database, for code that has to open its own.
+
+    Generation's completion write cannot use the request's session - it runs
+    inside the streaming response, after the handler has returned - so it takes
+    a factory instead. The app's own factory is bound to the dev database, so a
+    test has to hand in this one or the write lands somewhere the test cannot
+    see it.
+
+    Also how a test proves something was really committed: a second session is
+    a second connection, and an uncommitted row is invisible to it.
+    """
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
 @contextmanager
 def counting_queries(engine):
     """Count the statements actually sent while the block runs.
@@ -113,15 +129,32 @@ def counting_queries(engine):
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def client(session):
+async def llm():
+    """The model client every route test runs against.
+
+    Handed out as a fixture rather than built inside the client fixture so a
+    test can script it - a failure part way through the stream, or an embedder
+    that refuses - and then read back what it was asked to generate.
+    """
+    from app.llm.fake import FakeLLMClient
+
+    return FakeLLMClient()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def client(session, session_factory, llm):
     """An HTTP client driving the real app against the test database.
 
-    dependency_overrides swaps the app's per-request get_session for the
-    test session, so routes and assertions share one transaction view and
-    the dev database is never touched.
+    dependency_overrides swaps three things out. get_session becomes the test
+    session, so routes and assertions share one transaction view. get_llm
+    becomes the fake, so nothing reaches a real provider. And the session
+    factory becomes the test one: generation's completion write opens its own
+    session, and the app's factory points at the dev database, so without this
+    a streamed reply would be written somewhere no test can see.
     """
     from httpx import ASGITransport, AsyncClient
 
+    from app.api.deps import get_llm, get_session_factory
     from app.core.db import get_session
     from app.main import app
 
@@ -129,6 +162,8 @@ async def client(session):
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"

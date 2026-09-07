@@ -7,9 +7,12 @@ once. A difference in how two arms render the same question would show up in
 the eval as a quality difference that has nothing to do with context
 composition.
 """
+
+from uuid import UUID
+
 from dataclasses import dataclass,field
 from app.llm.base import LLMClient, PromptMessage, PromptRole
-from collections.abc import Sequence
+from collections.abc import Sequence,Mapping
 
 from typing import Any,Protocol,cast,Literal
 
@@ -32,14 +35,10 @@ SYSTEM_PROMPT = (
 
 WALK_TRUNCATED = "walk_truncated"
 
-# An ancestor the decay function marked for summarizing that had no summary
-# row, so its full text went instead. Costlier, still correct - and it needs
-# its own name, because "the walk was cut short" and "we paid full price for a
-# level that should have been cheap" are different findings with different
-# fixes.
-SUMMARY_MISSING = "summary_missing"
 
+SUMMARY_MISSING = "summary_missing"
 SUMMARY_MARKER = "[summarised]"
+EMBEDDING_MISSING="embedding_missing"
 
 
 # prepended when the oldest verbatim turn is an assistant turn, since
@@ -166,3 +165,106 @@ def ensure_leading_user_turn(messages: list[PromptMessage]) -> list[PromptMessag
         return [EARLIER_PLACEHOLDER, *messages]
 
     return messages
+
+def retrieval_query_text(question: Message, anchor: Anchor | None):
+    """The text retrieval searches with: the question, plus the highlight.
+    The question alone is usually too short to match anything on.
+    """
+
+    if anchor is None:
+        return question.content
+
+    return f"{question.content}\n\n{anchor.text}"
+
+def summarised_ids(steps: Sequence[AncestorStep], fidelities:Sequence[Fidelity]):
+    """The ids of the levels marked for summarizing, in walk order."""
+
+    return [
+        step.message.id
+        for step,fidelity in zip(steps,fidelities)
+        if fidelity =="summary"
+        
+    ]
+
+def render_decayed(
+        request:StrategyRequest,
+        fidelities:Sequence[Fidelity],
+        summaries: Mapping[UUID,str],
+        name: AnyStrategy,
+        extra: Sequence[str]=()
+):
+    messages = []
+    summary_missing= False
+
+
+    for step,fidelity in zip(reversed(request.walk.steps),reversed(fidelities)):
+        summary_text = (
+            summaries.get(step.message.id) if fidelity == "summary" else None
+        )
+
+        if fidelity =="summary" and summary_text is None:
+            summary_missing =True
+
+        messages.append(
+            full_turn(step.message)
+            if summary_text is None
+            else summarised_turn(step.message,summary_text)
+        )
+
+    messages.append(render_question(request.question,request.anchor))
+
+    degradations = []
+
+    if request.walk.truncated:
+        degradations.append(WALK_TRUNCATED)
+
+    if summary_missing:
+        degradations.append(SUMMARY_MISSING)
+
+    degradations.extend(extra)
+
+
+    return ComposedContext(
+        system=SYSTEM_PROMPT,
+        messages=ensure_leading_user_turn(messages),
+        strategy_used=name,
+        degradations=degradations
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
