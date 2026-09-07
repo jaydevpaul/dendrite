@@ -1084,3 +1084,355 @@ that, since it decides how the fixtures are split and cannot be retrofitted.
 `summary` steps back to `full` in place; the query is scoped by the walk's
 ancestor ids and filtered on `model_used`, and the `embed` call is the only
 network call in compose, so it is where the timeout and fallback live.
+
+## 2026-09-07 — Layer C built: C5 (ancestor-scoped retrieval and HierarchicalDecayWithRetrieval)
+
+Suite is **289 passing**, up from 250, and
+green on the first run of the full suite.
+**`app/services/retrieval.py`** is new and holds two things:
+`promotion_count(n_candidates, fraction, max_promotions)`, and
+`rank_ancestors_by_similarity()`, which is one query — `DISTINCT ON
+(message_id)` newest-first, filtered on the candidate ids and on `model_used`
+— plus a Python sort for the ranking.
+**The render loop moved into `app/context/base.py`** as `render_decayed()`,
+with `summarised_ids()` and `retrieval_query_text()` beside it and
+`EMBEDDING_MISSING`. `HierarchicalDecay` shrank to four lines and both decay
+arms now finish in the same function, so they cannot drift in how they render
+an identical turn. `strategies.py`'s module docstring was reworded — it still
+claimed to hold three strategies.
+**Five shape decisions, all silences in the spec rather than conflicts.**
+(1) The candidate pool is levels marked `summary` **that have a summary row**;
+one without a summary is already going out in full, so promoting it would
+spend a place and change nothing. (2) One embedding row per message, the
+newest, by the same rule the summary reader uses — nothing stops a message
+being embedded twice and two rows would take two promotion places. (3) An
+exact distance tie goes to the **nearer ancestor**, done in Python because the
+tie-break is the caller's ordering and `DISTINCT ON` will not let the same
+query order by distance anyway. (4) The `model_used` filter value comes from
+`settings.embedding_model`, as a constructor argument. (5) The shared render
+extracted rather than duplicated.
+**`embedding_missing` fires per *candidate*, not per summarized ancestor** —
+narrower than §12's wording, and a direct consequence of decision (1). On an
+empty pool there is no embed call and no `embedding_missing`; the summariser
+backlog is what is actually wrong there and `summary_missing` already says so.
+On embed failure or timeout it does not fire either — that path records
+`HierarchicalDecay` and the eval derives the degradation.
+**39 new tests.** `tests/test_retrieval.py` (15) covers the arithmetic with no
+DB and then what the query must *not* return: a sibling branch, another
+model's vector, the same message twice. The arm-5 block in
+`tests/test_context_strategies.py` runs on a new `a_retrieval_branch()` whose
+four candidate levels carry real sentences — distances come out
+`1.0 / 0.598 / 1.0 / 0.764` under the fake embedder, so "the nearest two" is a
+fact about the text and not about the query plan. `new_embedding` joined
+`tests/graph_builders.py`; `a_request` gained an `llm=` argument so a test can
+hand in a failing or slow embedder. Arm 5 is in `BUILT_STRATEGIES`.
+**Three new standing gotchas**, all from typos that shipped and did not raise:
+the chained-assignment dataclass field, the missing `await` that disables its
+own `is None` fallback, and the `DISTINCT ON`/`ORDER BY` ordering rule.
+**Next: sitting C6** — `compose_context()`. One thing is genuinely unsettled:
+whether a `SpanOnlyRequiresAnchor` on a continuation is a bug that escapes or
+a degradation that falls back.
+
+---
+
+## 2026-09-07 — Layer C built: C6, C7 and C8 (compose, generate, stream)
+
+Three sittings in one session. Layer C is complete except C9, the one real
+OpenAI client. Suite went **289 → 337**, in three steps: 304 after C6, 320
+after C7, 337 after C8.
+
+### C6 — `compose_context()`
+
+**`app/context/compose.py`** is new and holds three things: `STRATEGIES`, a
+module-level dict from strategy name to instance; `Composition`, a frozen
+dataclass pairing the `ComposedContext` with the `StrategyResolution`; and
+`compose_context()`, which looks the starting message up, resolves, walks, and
+dispatches through the table.
+
+**Dispatch is a lookup and the table is checked at import.** Two checks, both in
+the module body: its keys must equal `ALL_STRATEGIES`, and every instance's own
+`name` must equal the key it is filed under. The second one is not
+belt-and-braces — the key is what was resolved and the instance stamps the
+result, so those are two sources for one fact, and the mis-ordered-constructor
+trap from C4 would put a `TieredDecay` in `name` without raising.
+
+**Four shape decisions.**
+
+1. **`SpanOnlyRequiresAnchor` escapes rather than being caught.** Decided after
+   establishing that the state is forbidden by a *constraint*, not merely
+   improbable: `ck_edge_span_only_needs_anchor` will not store a `SpanOnly`
+   override on an unanchored edge, resolution can only answer `SpanOnly` for an
+   anchored depth-1 edge, and that is the same edge `anchor_from_walk` reads.
+   `max_depth=0` — the one way the walk could come back empty while resolution
+   still said `SpanOnly` — is already rejected by `resolve_strategy`'s own
+   `max_depth < 1` guard. So a fallback here would protect against nothing and
+   could never be exercised. Compose runs before the streaming response, so an
+   escape lands as a failed request with no blank row and no `Generation` row.
+2. **A named wrapper, not a tuple and not a field on `ComposedContext`.** No arm
+   can fill `source`, so putting it on the context would leave a hole every
+   strategy ignores, and `as_payload()` stays exactly `system` + `messages`.
+3. **No forced-strategy argument.** Section 7's harness names arms directly, so
+   it does not come through here; adding one now would invent its shape *and* be
+   the one thing that would make decision (1) reachable.
+4. **`strategies` is a keyword with the module table as its default**, so a tuned
+   set of arms can be handed in without editing the module.
+
+**Three message lookups per compose, accepted.** `compose_context` needs the
+`Message` for `StrategyRequest.question`, and `resolve_strategy` and
+`walk_ancestors` each re-fetch it for their own `MessageNotFound`. Doing the
+cheap existence check first means a bad id fails before two recursive CTEs run.
+Threading a loaded message through B2's signatures to save two single-row
+primary-key lookups was not worth it against a 1–2s budget.
+
+**15 tests** in `tests/test_compose.py`. Beyond the four resolve-then-dispatch
+cases: that `resolution.strategy` and `context.strategy_used` can *disagree*
+(arm 5 with a dead embedder) and do agree on a clean run, so a composer that
+always reported the simpler arm fails; that one `max_depth` reaches both
+climbing queries (`depth_cap` **and** `walk_truncated` from a single call); that
+compose leaves `session.new/dirty/deleted` empty; the blank-assistant-row
+mistake answering `branch_boundary` plus the conversation default instead of
+`SpanOnly`; and an `IntegrityError` test for the constraint decision (1) rests
+on.
+
+`a_question()` and `a_deep_question()` moved into `tests/graph_builders.py` so
+the compose and generation suites share one home for whole-thread shapes.
+
+### C7 — the generation service
+
+**`app/services/generation.py`** is new: `start_generation()`,
+`stream_generation()`, `PreparedGeneration`, `GenerationDone`,
+`GenerationFailed`, `NotAUserMessage`, and two private writers.
+
+**Two functions, and the split is forced.** Composition and the blank row can
+both still refuse with a 404 or a 422; once a streaming response is returned the
+status line is on the wire. A single async generator would not run its body
+until the first iteration, by which point it is too late — so everything that
+can refuse is in `start_generation`, and `stream_generation` runs with the
+headers gone.
+
+**Five shape decisions.**
+
+1. **The role guard lives in the service**, raising `NotAUserMessage`, not in the
+   route. The service is the thing that *creates* the blank assistant row, so
+   putting the guard here means no caller can compose from one — including the
+   eval harness, which never goes through a route.
+2. **A failure logs the real exception and sends a fixed detail.** First logging
+   in `app/` (`logger = logging.getLogger(__name__)`), which also gives D7's
+   "and is logged" somewhere to go. Provider error text carries request ids and
+   account details and this stream is browser-facing.
+3. **The session factory is a parameter** defaulting to `async_session_factory`.
+   D9 names that factory and it is bound to the *dev* engine, so a test of the
+   completion write cannot reach the test database through it.
+4. **`model_used` on a failed row comes from `settings.generation_model`** — the
+   column is NOT NULL and the provider never got as far as reporting one. On
+   success the provider's own value wins, same rule as the token counts.
+5. **`conversation.updated_at` is bumped at the blank insert**, where
+   `create_message` already bumps it, not in the completion write — that runs in
+   another session and would have to re-load the conversation.
+
+**A real bug found by a test, and it is a new standing gotcha.**
+`assistant.updated_at = assistant.created_at` did **not** work. The two columns
+are already equal from the insert, so the assignment is not a *change*, the ORM
+left the column out of the SET clause, and `onupdate=func.now()` supplied
+`now()` after all — `updated_at` came out 44ms ahead of `created_at`. Replaced
+with an explicit `update(Message).values(content=..., updated_at=Message.created_at)`,
+which cannot be optimised away and reads as what it is. This looks exactly like
+the explicit-value-wins rule working, and the only symptom is a timestamp
+slightly off.
+
+**16 tests** in `tests/test_generation.py`, every write assertion read through a
+second session because two separate commits are the whole pattern and only a
+second connection can tell a committed row from one in an open transaction. The
+gate test holds the stream open and asserts the message is still blank with no
+`Generation` row, then opens the gate and watches both appear.
+
+A **`session_factory` fixture** joined conftest.
+
+### C8 — the SSE route, the four events, `pending`
+
+**`app/api/sse.py`** is new and holds one function, `frame(event, data)`, so
+nothing else in the app ever writes a `data:` line by hand.
+
+**The route is `POST /conversations/{id}/messages/{message_id}/generate`** on the
+existing messages router — no new router, no new Vite proxy entry. The handler
+does `start_generation` (which can 404 or 422), then returns a
+`StreamingResponse` whose generator emits `start` and then translates the
+service's events one-to-one onto `chunk` / `done` / `error`.
+
+**Two new dependencies in `app/api/deps.py`.** `get_session_factory()` returns
+`async_session_factory`, and `get_llm()` returns a client. Both exist to be
+overridden: without the factory seam, a route test's streamed reply would be
+written into the dev database while the test reads the test one.
+
+**Three shape decisions.**
+
+1. **The `start` event's `strategy` is what actually ran** (`strategy_used`), not
+   what resolution chose. A client is then never shown a strategy the stored
+   `Generation` row contradicts; `source` still says where the resolution came
+   from, and `degradations` on `done` reconciles the two when they differ.
+2. **An eighth LLM config key, `llm_client: Literal["fake", "openai"] = "fake"`.**
+   Explicit rather than inferred from whether `llm_api_key` happens to be set: a
+   deployment that lost its key would otherwise serve convincing fake replies
+   with nothing in the response saying so. It also means frontend slice 3 can be
+   built end to end against the fake for free.
+3. **`SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}`.**
+   The second does nothing today — there is no nginx in front of uvicorn — but
+   nginx buffers proxied responses by default, and that failure presents as a
+   very slow model rather than as a misconfigured proxy.
+
+**`MessageOut.pending`** is a Pydantic `@computed_field` returning
+`role == "assistant" and content == ""`. No column, no migration, and every
+existing message read gets it for free. Checked first that no test asserted a
+whole message body, so the added key breaks nothing.
+
+**17 tests** in `tests/test_generate_route.py`, all of them parsing the wire
+format rather than inspecting objects — the framing is the part that breaks
+silently. The load-bearing one scripts a reply full of blank lines and asserts
+one frame per chunk, which is what would fail if the text ever went out
+unencoded. `llm` and `session_factory` are now wired into the `client` fixture,
+so route tests can script a failing embedder or a mid-stream death.
+
+**One test premise was wrong and the code was right.** An arm-5 route test
+expected the fallback to `HierarchicalDecay` with a dead embedder, but nothing
+writes summaries yet, so the candidate pool was empty, no embed call happened,
+and the arm honestly reported itself — exactly C5's decision (1). Fixed by
+inserting summary rows in the test first, and a companion test now asserts the
+undegraded run reports itself.
+
+**Next: sitting C9** — the one concrete OpenAI client, against the real API. It
+needs a key, `llm_client=openai` in `.env`, and `stream_options` with
+`include_usage` true so the usage numbers arrive at all. After that, frontend
+slice 3 — linear chat, plus moving the conversation list into a persistent left
+sidebar.
+
+---
+
+## 2026-09-07 — Frontend slice 3: linear chat, and the list becomes a sidebar
+
+First frontend work since slice 2, and the first slice that renders Layer C.
+No backend file changed; the suite stayed at **337 passing**.
+
+### What shipped
+
+```
+frontend/src/
+├── components/
+│   ├── app-shell.tsx              rewritten: sidebar + thread pane, drawer below lg
+│   ├── conversation-sidebar.tsx   new: the list, logo, new-conversation, identity, sign out
+│   └── ui/textarea.tsx            new primitive, same line-strong edge rule as Input
+├── features/messages/             new folder
+│   ├── api.ts                     Message/Edge/ConversationGraph mirrors, AnyStrategy, StrategySource
+│   ├── queries.ts                 messageKeys, useConversationGraph, appendCreatedMessage
+│   ├── stream.ts                  the SSE frame reader
+│   ├── thread.ts                  buildThread (the path walk) and findGap
+│   ├── use-chat.ts                send, generate, the live run, per-run records
+│   ├── message-turn.tsx           one turn, its run metadata, its hidden siblings
+│   └── composer.tsx               the prompt zone
+├── lib/api.ts                     + postStream()
+└── routes/
+    ├── conversations.tsx          rewritten: /app is now "start a conversation"
+    └── conversation.tsx           rewritten: /app/c/:id is the thread
+```
+
+`vite.config.ts` is untouched — all three routes nest under `/conversations`,
+which the proxy already forwards.
+
+### Two shape decisions, both asked before building
+
+1. **The linear path is: continuation edges only, newest child at each step.**
+   The API returns the whole graph as two flat lists, so a linear view has to
+   pick a path. Continuation-only keeps anchored branches off the main path, so
+   slice 4 cannot silently hijack this view. Newest-wins is what makes retry
+   work: a retry writes a *second* assistant child of the same question rather
+   than replacing the first, so the new attempt becomes the path and the
+   abandoned one drops off it — counted on the question as "1 earlier reply not
+   shown here", never hidden. Each step also reports its unshown replies and
+   branches separately.
+2. **An unanswered question or an unfinished reply gets an explicit button, and
+   nothing generates on its own.** Both states are legal and both survive a
+   reload (a blank assistant row reads `pending` forever). Generating on mount
+   was rejected: reopening a thread whose generation keeps failing would call
+   the model every time, and with a real key that is real spend.
+
+### The rest of the slice
+
+- **The list moved into the shell** so the app reads like a chat app. What is
+  left at `/app` is the one thing a sidebar cannot do — name a new graph and
+  open it. The API layer, hooks and row markup carried over unchanged. The
+  title is still asked for rather than derived from the first message; nothing
+  in the API names a conversation for you.
+- **The shell owns the viewport height** (`h-dvh overflow-hidden`) so the
+  thread scrolls in its own pane and the prompt zone stays put. Below `lg` the
+  list is a drawer, not a stacked column — stacking would push the composer
+  below the fold.
+- **`stream.ts`**: `fetch` + `ReadableStream`, because the reply streams from a
+  `POST` and `EventSource` only issues a `GET`. Decodes with `stream: true`
+  (a multi-byte character split across two network chunks survives), splits
+  frames on the blank line, normalises CRLF, `JSON.parse`s each `data:`,
+  ignores unknown event names, and cancels the body in a `finally`.
+- **`postStream` checks `response.ok`** and that check is meaningful: every
+  status-code failure happens before the first byte. Once the stream is open
+  the status cannot change and a failure arrives as an `error` event.
+- **On `done` the graph is refetched *before* the live text is dropped.** The
+  blank assistant row is inserted server-side after the last read and stays
+  blank until the completion write, so clearing first would flash an unfinished
+  reply between the last chunk and the refetch.
+- **The route is keyed on the conversation id**, so switching conversations
+  remounts. Without it a reply still streaming follows the user into the next
+  conversation and renders there.
+- **Run metadata sits under each reply** in mono: the arm that ran, why it was
+  chosen (`source` mapped to a plain phrase), the model, and the provider's own
+  token counts. Degradations render in `warn` — the semantic use that token is
+  reserved for. Per-session by construction: nothing reads `Generation` rows
+  back yet, so a reload shows no numbers rather than stale ones.
+- **The textarea is never disabled**, only the send button. Disabling it would
+  take focus away mid-reply and hand it back to nobody, and sending mid-stream
+  would abort the reply still arriving. Enter sends, Shift+Enter breaks the
+  line, and an IME's composing Enter is ignored.
+- **The conversation detail page's facts** (created, updated, id) survived the
+  rewrite inside a native `<details>` in the header — no dependency.
+
+### Verified live, through the proxy on :5173
+
+Fifteen steps: 401 with no cookie → 201 signup → 201 create → 201 root message
+with `edge: null` → graph reads one message, no edges, `pending: false` →
+generate streams `start` (`HierarchicalDecayWithRetrieval`,
+`conversation_default`, `gpt-5.6-luna`), one `chunk` frame per chunk, `done`
+with `74 in / 6 out` and no degradations → the stored reply is complete and its
+`created_at` equals its `updated_at`, so it reads as never edited → a second
+turn streams four frames → **regenerating the same question writes a second
+assistant sibling, and the path walk picks it while reporting "1 earlier reply"
+on the question** → 422 generating on an assistant message → 404 on an unknown
+message id → 422 on whitespace-only content → 409 on a second root → 404 on
+another user's graph → the conversation's `updated_at` moved past
+`created_at`, which is the sidebar's sort key.
+
+**The unfinished-reply state needed a different method.** The fake finishes
+faster than a client can abandon it — `curl -m 0.05` disconnects and the server
+still completes the write, because by then the reply is already collected. So a
+blank assistant row and its edge were inserted straight into the dev database:
+the API reported `pending: true`, the path walk resolved the gap as
+"unfinished" and named the right question to retry, and the retry then took
+over the path with the blank row counted off it.
+
+`npm run build` typechecks clean and emits `conversation` as its own chunk
+(17.4 kB). The write-up is in `docs/frontend_design.md` §8.
+
+### Flagged, not decided
+
+- **No markdown renderer.** It is a dependency, and it is also the thing that
+  will have to cooperate with character offsets once a branch is taken from a
+  highlighted span — so it waits until that constraint is on the table.
+  Replies render as plain text with newlines preserved.
+- **No frontend test runner.** `thread.ts` is the first pure, load-bearing
+  frontend logic with real edge cases (a fork, an abandoned reply, an anchored
+  child). Adding Vitest is the decision that would let it be unit tested; the
+  path walk was instead verified against a real forked graph by reimplementing
+  the same rule in Python over the live API response.
+- **No strategy picker** still. The header shows the conversation default, each
+  reply shows what actually ran.
+
+**Next:** sitting **C9** (the one OpenAI client — needs a key and
+`stream_options` with `include_usage`), or **frontend slice 4** — span
+branching, which the edge and anchor routes already support. Slice 4 no longer
+has a backend blocker.
