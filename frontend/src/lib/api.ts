@@ -73,3 +73,38 @@ export async function request<T>(
 
   return (await response.json()) as T;
 }
+
+/**
+ * A POST whose response is a stream rather than a JSON body.
+ *
+ * The generation route streams server-sent events, and it streams them from a
+ * POST -- so the browser's `EventSource`, which only ever issues a GET, cannot
+ * read it. `fetch` plus the response's `ReadableStream` is the way in.
+ *
+ * Everything that can fail with a status code -- an unknown message, a message
+ * that is not a user message -- fails before the first byte of the stream, so
+ * by the time headers arrive the status is final and this check is meaningful.
+ * A failure *during* the stream cannot change the status any more; it arrives
+ * as an `error` event inside the stream instead.
+ */
+export async function postStream(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new ApiError(response.status, await readError(response));
+  }
+
+  if (response.body === null) {
+    throw new ApiError(response.status, "The server sent no stream to read.");
+  }
+
+  return response.body;
+}

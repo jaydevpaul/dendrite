@@ -396,7 +396,7 @@ The user's requirement is "smooth, not heavy."
 |---|---|---|
 | ~~**1. Shell + auth**~~ **DONE** | done (2026-08-30) | Vite scaffold, Tailwind v4 + shadcn-idiom components, palette tokens, app shell, signup/login pages, route guards on `/auth/me`, logout, theme toggle |
 | ~~**2. Conversation list**~~ **DONE** | done (2026-08-31) | List, inline create, empty state, conversation detail with rename |
-| 3. Linear chat | message routes + generation | Message thread, composer, streaming via SSE |
+| ~~**3. Linear chat**~~ **DONE** | done (2026-09-07) | Persistent sidebar, message thread, composer, SSE streaming, retry on an unanswered or unfinished reply |
 | 4. Span branching | edge routes + anchors | Text selection → branch action; anchored-span rendering |
 | 5. Tree navigation | ancestor walk | Sidebar tree, branch/continuation distinction |
 | 6. Strategy + eval | eval framework | Strategy picker, per-branch context inspector, token counts |
@@ -513,6 +513,137 @@ the rejected write never landed. `npm run build` typechecks clean and emits
 `conversations` and `conversation` as separate chunks. The backend's 69 tests
 still pass.
 
-**Slice 3 (linear chat) is blocked** until the message routes and generation
-exist — section 8.10. Note the graph view (decision record section 8.9) ships
-*after* slices 1–4 and the eval framework, not before them.
+### Slice 3 — what shipped, and how it was verified
+
+```
+src/
+├── components/
+│   ├── app-shell.tsx              sidebar + thread pane, drawer below lg
+│   ├── conversation-sidebar.tsx   the list, moved out of its own page
+│   └── ui/textarea.tsx            new primitive, same edge rule as Input
+├── features/messages/
+│   ├── api.ts                     typed endpoints, MessageOut/EdgeOut mirrors
+│   ├── queries.ts                 graph query + folding a 201 into the cache
+│   ├── stream.ts                  the SSE frame reader
+│   ├── thread.ts                  graph -> one linear path, and the gap in it
+│   ├── use-chat.ts                send, generate, live run, per-run records
+│   ├── message-turn.tsx           one turn, its run metadata, its hidden kin
+│   └── composer.tsx               the prompt zone
+└── routes/
+    ├── conversations.tsx          /app       now "start a conversation"
+    └── conversation.tsx           /app/c/:id the thread
+```
+
+**The list is a sidebar, and `/app` is a start surface.** The app should read
+the way a chat app reads — a thread you are in, everything else you have open
+beside it — so the list moved into the shell, and the old list page kept the one
+thing a sidebar cannot do: name a new graph and open it. The API layer, the
+query hooks and the row markup carried over unchanged; only the frame is new.
+
+The shell now owns the viewport height and hides its own overflow, so the
+thread scrolls inside its pane and the prompt zone stays put. A page that
+scrolled as a whole would carry the composer off the bottom of the screen.
+Below `lg` the list is a drawer rather than a column, for the same reason the
+auth brand panel is dropped there: stacking it would push the actual work below
+the fold.
+
+**A linear view has to choose a path, and the rule is: continuation edges only,
+newest child at each step.** The API returns the whole graph as two flat lists
+because a conversation is a tree and there is no single order to serialise it
+in. Both halves of the rule are load-bearing:
+
+- *Continuation-only* keeps branches off the main path. A branch grown from a
+  highlighted span is a different thread of thought, and once slice 4 can
+  create one it must not silently take over this view.
+- *Newest-wins* is what makes retrying work. A retry writes a **second**
+  assistant child of the same question rather than replacing the first, so the
+  newer attempt becomes the path and the abandoned one drops off it — counted
+  on the question as "1 earlier reply not shown here", not hidden.
+
+Every message on the path also reports how many children the view is *not*
+showing, replies and branches separately. They are real rows in the graph;
+making them navigable is the tree view's job, but pretending they do not exist
+is not.
+
+**A question with no reply is a legal state, and it gets a button.** Generation
+can fail on its own, and a tab closed mid-stream leaves a blank assistant row
+that `MessageOut.pending` reports as pending forever. The thread renders both
+cases and offers the same recovery — ask for a reply to that question again.
+Nothing generates on its own: a page that generated on mount would call the
+model every time a thread whose generation keeps failing is reopened, and with
+a real key that is real money.
+
+**`EventSource` cannot read this stream.** The reply streams from a `POST`, and
+`EventSource` only ever issues a `GET`, so `stream.ts` uses `fetch` plus the
+response's `ReadableStream`: decode with `stream: true` so a multi-byte
+character split across two network chunks survives, split frames on the blank
+line, and `JSON.parse` each `data:` payload. Chunk text is JSON on the wire
+because a frame ends at the first blank line and model output is full of
+newlines — the symptom of getting that wrong is the model appearing to write
+broken markdown, not a transport error.
+
+Everything that can fail with a status code — an unknown message, a message
+that is not a user message — fails before the first byte, so `postStream`
+checking `response.ok` is meaningful. Once the stream is open the status cannot
+change, and a mid-stream failure arrives as an `error` event instead.
+
+**The row a reply is being written into is not in the cache, so the stream
+renders it.** The blank assistant row is inserted server-side after the last
+read, and it stays blank until the whole reply is written in one go at the end.
+So the live text renders as its own turn, and when `done` arrives the graph is
+**refetched before** the live text is dropped — clearing first would flash an
+unfinished reply between the last chunk and the refetch.
+
+The route is keyed on the conversation id, so switching conversations remounts.
+Without that, a reply still streaming would follow the user into the next
+conversation and render there.
+
+**Run metadata is on the message, not behind a panel.** The arm that composed
+the context, why that arm was chosen, the model, and the provider's own token
+counts sit under each reply in mono — that measurement is the point of the
+project. Degradations render in `warn`, which is exactly the semantic use that
+token is reserved for. It is per-session by construction: nothing reads
+`Generation` rows back yet, so a reload shows no numbers rather than stale or
+invented ones.
+
+**Two things deliberately not built.** There is no markdown renderer — it is a
+dependency, and it is also the thing that will have to cooperate with character
+offsets when a branch is taken from a highlighted span, so it waits until that
+constraint is on the table. And there is still no strategy picker; the header
+shows the conversation's default and each reply shows what actually ran.
+
+**No new proxy entry was needed.** All three routes nest under
+`/conversations`, which `vite.config.ts` already forwards — the reason to
+prefer nesting, not just tidiness.
+
+Verified against the live backend **through the proxy on :5173**. Fifteen steps
+passed: 401 with no cookie → 201 signup → 201 create → 201 root message with
+`edge: null` → the graph reads one message, no edges, `pending: false` →
+generate streams `start` (naming `HierarchicalDecayWithRetrieval`,
+`conversation_default`, `gpt-5.6-luna`), one `chunk` frame per chunk, then
+`done` with the provider's `74 in / 6 out` and no degradations → the stored
+reply is complete and its `created_at` equals its `updated_at`, so it reads as
+never edited → a second turn under the reply streams four frames →
+regenerating the *same* question writes a second assistant sibling, and the
+path walk picks it while reporting "1 earlier reply" on the question → 422
+generating on an assistant message → 404 on an unknown message id → 422 on
+whitespace-only content → 409 on a second root → 404 on another user's graph →
+the conversation's `updated_at` moved past `created_at`, which is the sidebar's
+sort key.
+
+The unfinished-reply state was verified separately, because the fake finishes
+too fast to abandon: a blank assistant row and its edge were inserted directly
+into the dev database, the API reported `pending: true`, the path walk resolved
+the gap as "unfinished" and named the right question to retry, and the retry
+then took over the path with the blank row counted off it. `npm run build`
+typechecks clean and emits `conversation` as its own chunk.
+
+**Flagged, not decided: there is still no frontend test runner.** Slices 1 and
+2 were verified live and so was this one, but the path walk in `thread.ts` is
+the first piece of frontend logic that is pure, load-bearing and has real edge
+cases — a fork, an abandoned reply, an anchored child. It is the natural first
+thing to unit test, and adding Vitest is the decision that would let that
+happen.
+
+Note the graph view (decision record section 8.9) ships *after* slices 1–4
+and the eval framework, not before them.
