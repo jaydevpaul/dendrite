@@ -89,27 +89,9 @@ runner.
 correction or narrowing from this session — read the parentheticals, not just
 the headline.
 
-Committed through `1b83fc8` — C4's write-up and the §12 `embedding_missing`
-entry. **Uncommitted: everything from C5, C6, C7 and C8.** That is
-`app/services/retrieval.py`, `app/context/compose.py`,
-`app/services/generation.py`, `app/api/sse.py`, the `generate` route and
-`SSE_HEADERS` in `app/api/routes/messages.py`, the two new dependencies in
-`app/api/deps.py`, `llm_client` in `app/core/config.py`, `MessageOut.pending`
-in `app/schemas/message.py`, the arm-5 additions to `app/context/base.py` and
-`app/context/strategies.py`, and on the test side `tests/test_retrieval.py`,
-`tests/test_compose.py`, `tests/test_generation.py`,
-`tests/test_generate_route.py`, the `session_factory` and `llm` fixtures in
-`tests/conftest.py`, and the whole-thread builders in
-`tests/graph_builders.py`. 337 passing, none of it committed.
-
-**Also uncommitted: the whole of frontend slice 3.** That is
-`frontend/src/features/messages/` (seven files),
-`frontend/src/components/conversation-sidebar.tsx`,
-`frontend/src/components/ui/textarea.tsx`, the rewritten
-`frontend/src/components/app-shell.tsx`, `frontend/src/routes/conversation.tsx`
-and `frontend/src/routes/conversations.tsx`, `postStream()` in
-`frontend/src/lib/api.ts`, and the §8 slice-3 write-up in
-`docs/frontend_design.md`. No backend file changed for it.
+**The tree is clean, committed through `555be6d`.** Three commits closed out
+this work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
+3, and `555be6d` for the write-ups. 337 tests passing on a clean tree.
 
 ### Running it
 
