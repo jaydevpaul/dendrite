@@ -96,9 +96,9 @@ lives in a **right-hand panel behind a switch**, because the left sidebar holds
 the conversation list. The palette gained one token, `scrim`, recorded as a
 dated amendment in `frontend_design.md` §5.
 
-**The tree is clean, committed through `HEAD`.** Three commits closed out
+**The tree is clean, committed through `925312d`.** Four commits closed out
 that work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
-3, and `555be6d` for the write-ups. 337 tests passing on a clean tree.
+3, `555be6d` for the write-ups, and `925312d` for slice 3's rework against the reference apps. 337 tests passing on a clean tree.
 
 ### Running it
 
