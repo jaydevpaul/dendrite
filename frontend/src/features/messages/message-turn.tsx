@@ -1,6 +1,5 @@
 import { cn } from "@/lib/utils";
 import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
-import type { Message } from "./api";
 import type { RunRecord } from "./use-chat";
 import type { ThreadStep } from "./thread";
 
@@ -11,12 +10,11 @@ import type { ThreadStep } from "./thread";
  * markdown yet: that is a dependency, and it is also the thing that will have
  * to cooperate with character offsets when a branch is taken from a
  * highlighted span, so it waits until that constraint is on the table.
+ *
+ * The model's words are set in the serif and the reader's own in the sans.
+ * That is not decoration: it separates what was written for you from what you
+ * wrote, without a label or a colour doing the work.
  */
-
-const ROLE_LABEL: Record<Message["role"], string> = {
-  user: "you",
-  assistant: "dendrite",
-};
 
 export function MessageTurn({
   step,
@@ -50,15 +48,12 @@ export function MessageTurn({
 
   return (
     <article>
-      <p className="mb-[7px] font-mono text-[10px] tracking-[0.14em] text-dim uppercase">
-        {ROLE_LABEL.assistant}
-      </p>
       {text === "" ? (
         <p className="text-[14px] leading-[1.6] text-muted italic">
           This reply was started and never landed.
         </p>
       ) : (
-        <div className="text-[15px] leading-[1.68] break-words whitespace-pre-wrap text-ink">
+        <div className="font-serif text-[16.5px] leading-[1.62] break-words whitespace-pre-wrap text-ink">
           {text}
           {streaming ? <Caret /> : null}
         </div>
@@ -101,13 +96,17 @@ function RunMeta({ record }: { record: RunRecord }) {
   const tokens =
     record.inputTokens === null && record.outputTokens === null
       ? null
-      : `${record.inputTokens ?? "?"} in / ${record.outputTokens ?? "?"} out`;
+      : `${record.inputTokens ?? "?"} → ${record.outputTokens ?? "?"}`;
 
   return (
-    <div className="mt-[10px] flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] text-dim">
-      <span className="text-muted">{record.strategy}</span>
-      <span>{SOURCE_LABEL[record.source]}</span>
-      <span>{record.model}</span>
+    <div
+      className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] text-dim"
+      // Why this arm ran, and which model, in the tooltip. They were two more
+      // words on the longest line under every reply, and the arm plus the cost
+      // is what anyone reads at a glance.
+      title={`${SOURCE_LABEL[record.source]} · ${record.model}`}
+    >
+      <span>{record.strategy}</span>
       {tokens ? <span>{tokens}</span> : null}
       {record.degradations.map((degradation) => (
         <span key={degradation} className="text-warn">
@@ -186,19 +185,37 @@ function Siblings({ step, align }: { step: ThreadStep; align: "left" | "right" }
 export function StreamingTurn({ text, phase }: { text: string; phase: "opening" | "streaming" }) {
   return (
     <article>
-      <p className="mb-[7px] font-mono text-[10px] tracking-[0.14em] text-dim uppercase">
-        {ROLE_LABEL.assistant}
-      </p>
       {phase === "opening" && text === "" ? (
         <p className="font-mono text-[11px] tracking-[0.1em] text-dim uppercase">
           Composing context
         </p>
       ) : (
-        <div className="text-[15px] leading-[1.68] break-words whitespace-pre-wrap text-ink">
+        <div className="font-serif text-[16.5px] leading-[1.62] break-words whitespace-pre-wrap text-ink">
           {text}
           <Caret />
         </div>
       )}
+    </article>
+  );
+}
+
+/**
+ * The user's own text, before the write has come back.
+ *
+ * Only used for the message typed on the start surface and carried into a
+ * conversation that was created for it. The alternative is to render nothing
+ * until the POST returns, which means the page someone just pressed Enter on
+ * arrives empty and then jumps twice. This is their own text; there is nothing
+ * to wait for before showing it.
+ */
+export function PendingUserTurn({ text }: { text: string }) {
+  return (
+    <article className="flex justify-end">
+      <div className="max-w-[85%] rounded-xl bg-surface px-4 py-[11px]">
+        <p className="text-[14.5px] leading-[1.6] break-words whitespace-pre-wrap text-ink">
+          {text}
+        </p>
+      </div>
     </article>
   );
 }

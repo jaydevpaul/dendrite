@@ -1477,3 +1477,249 @@ does not know.
 
 **Next:** sitting **C9** (needs a key), or **frontend slice 4 — span
 branching**, which is unblocked.
+
+---
+
+## 2026-09-08 — Frontend polish: the wash, the ground, and the friction on the way in
+
+No backend change. Everything here came from looking at the running app beside
+Claude, ChatGPT and Gemini and asking why ours looked heavier.
+
+**The page wash was invisible, so it was rebuilt.** `.hero-wash` shipped at
+0.09/0.05 alpha — measured exactly as designed and read as nothing at all next
+to the login page's `.brand-panel`, which is what a gradient in this palette is
+supposed to look like. It is now a directional sweep plus two corner glows
+driven by `--wash-*` custom properties, peaking at 0.199. **Light got its own
+pigment, not just its own strength:** the dark moss over warm paper composites
+to a pale mint, so light tints with its own darker accent at 0.102.
+
+It also went onto `/app`, which had no gradient at all while every other entry
+point had one. The thread and sidebar stay flat deliberately — ink strength
+carries fidelity decay in there, the accent marks branches and the current
+node, and the anchored span has to stay the loudest thing on screen.
+
+**`dim` cannot sit on a gradient, and that is now a rule.** On the strengthened
+wash it measures 4.08:1 dark and 3.93:1 light against a 4.5:1 floor — the same
+finding that banned `dim` from the brand panel at 4.20:1. Cost two edits: the
+landing hero's stats row moved values to `muted` and labels to `ink` (which
+also put that hierarchy the right way round — it had labels louder than
+values), and `/app` moved three labels off `dim`.
+
+**An empty conversation now centres its prompt.** It was a heading, a paragraph
+and a prompt pinned to the bottom with a screen of dead space between them.
+`StartPane` centres a short greeting and a roomier prompt over `.start-glow`,
+a softer centred radial. **Softer for a measured reason:** the prompt field's
+own edge is `line-strong` against a 3:1 floor, and it stops clearing that at
+about 0.13, so the glow peaks at 0.117 dark / 0.066 light. A first attempt at
+personalising the greeting from the email local part was removed — the address
+tested with produced "Jaydevjoestar", which is the failure mode of guessing a
+name from an address.
+
+**`/app`'s title form is gone.** It asked for a title on its own screen with
+the thread a click further on — a form between the user and the thing they came
+for, for a field now filled in from the first message. `/app` is the same
+`StartPane`, so the prompt does not move between the two screens. **Nothing is
+created until something is sent**, or the sidebar fills with untouched
+`Untitled`s from pages opened and abandoned. The typed text rides along in
+history state rather than being posted from `/app`: posting it there would
+stream the reply into a component about to unmount, which aborts it. The
+receiving side drops it out of history before sending, and a ref guards the
+double-invoked development effect.
+
+**Conversations are named from their first message.** Only when the name is
+still exactly `Untitled`, and only from the root. Truncation, not
+summarisation — whitespace collapsed, word boundary, 48 characters. A generated
+title would mean a second provider call per conversation, or today with no key
+a title written by the fake, so every conversation would be called "A fake
+reply in two parts." A failed rename is swallowed; it must not take the message
+down with it.
+
+**Sidebar rows went from two lines to one.** Roughly 46px a row against about
+30px in every other chat app. The relative timestamp moved into the tooltip
+next to the absolute one — nobody scans a conversation list by it.
+
+### The dark ground deepened to `#1A1A1A` — a LOCKED palette change
+
+Written up as a dated superseding amendment in `frontend_design.md` section 5,
+per the rule that a locked decision is superseded in writing and never pivoted
+silently.
+
+**The four greys were solved, not picked.** `surface`, `raised` and `line`
+reproduce the relationships the palette was designed around to three decimals:
+1.094x, 1.264x and 1.378x above the ground, against 1.095x, 1.262x and 1.382x
+before. Only the depth changed. `#1A1A1A` is close to the floor — below about
+`#171717` no lighter grey lands on the 1.095x `surface` relationship at all, so
+going deeper means redesigning the ramp rather than moving it.
+
+**It repaired a live failure.** `dim` on `raised` measured **4.43:1** against a
+4.5:1 floor, shipped, missed because the original pass compared every token
+against the *ground* and not against the surfaces it actually sits on. Now
+4.90:1. Every token clears its floor on all three surfaces; the worst cases are
+`dim` 4.90:1 and `line-strong` 3.41:1, both on `raised`.
+
+**Three things hard-code the ground and had to move with it:** `accent-ink`
+(the page colour punched out of a filled accent, now 8.76:1 on the accent), the
+brand panel's two dark stops — its 70% stop landed exactly on the old ground,
+so left alone the panel would have read *lighter* than the page beside it — and
+the favicon tile, which hard-codes it because a favicon has no inherited
+context. The panel's lightest stop is untouched, and that is the one every
+`panel-*` token was measured against, so `panel-ink` 9.48:1, `panel-muted`
+5.28:1 and `panel-accent` 5.94:1 all still hold.
+
+**The light theme is untouched.** Light is warm paper; darkening it would be a
+different concept rather than a deeper one.
+
+### Verified
+
+Every ratio in this entry was computed from WCAG relative luminance, not
+estimated, including the compositing of each gradient's worst stop over its
+ground. The new create-then-send flow was walked through the proxy on :5173:
+`{}` creates an `Untitled`, the root message lands, the derived title PATCHes
+to "Why does the linear view walk continuation", generate streams four frames,
+and the final read shows the named conversation with its root claimed and no
+pending row. `npm run build` typechecks clean; `start-pane` is its own chunk
+and the conversation chunk dropped from 18.15 kB to 15.60 kB.
+
+**Next:** unchanged — sitting **C9** (needs a key), or **frontend slice 4**,
+span branching.
+
+---
+
+## 2026-09-08 (second session) — Slice 3 reworked against the references
+
+Driven by looking at the running app beside Claude, ChatGPT and Gemini. No
+backend change; the suite is untouched at 337.
+
+### What came off the chat page
+
+The bordered header band and its message-count line, the `DENDRITE` role label
+over every reply, `conversation default` and the model name from the metadata
+line (now in its tooltip), the composer's raised band and top border, and the
+`Enter sends` hint everywhere except the empty state. The header is the title
+and a rename pencil.
+
+**The conversation's facts moved under the prompt** — count, created, updated,
+one centred line of plain text where Claude puts its disclaimer. They were
+behind a disclosure first, which is a click and a panel to read two timestamps.
+**The id is gone entirely**: it is in the address bar, and a uuid was the widest
+thing on the row for something nobody reads off a screen.
+
+**One bug worth remembering.** The disclosure was briefly `<details
+className="flex">`, which puts the revealed panel in a *row beside* the summary
+instead of below it. It looked like a broken layout rather than a wrong class,
+and the row belongs on the `<summary>`, which is the only part that should be
+one.
+
+### The gradient, three attempts
+
+`.hero-wash` shipped at 0.09 alpha — measured as designed, invisible on screen.
+Strengthened to a 0.199 peak with **light on its own pigment**, because dark
+moss over warm paper composites to a pale mint.
+
+Then a bespoke centred bloom for the empty conversation, `.start-glow`, built
+to look like the glow other chat tools put behind their prompt. **Deleted the
+same day.** Two lessons kept: a two-stop radial bands on a dark ground and two
+of them crossing shows as a mottled corner; and a colour alone over near-black
+is paint, not light — 9% moss over `#1A1A1A` lands on `#272B24`, army green.
+The one that mattered was neither: it was a *different gradient language* beside
+two directional ones, and no amount of tuning fixes that. `.hero-wash` now
+carries all three entry surfaces. Fit beat novelty and the fix was to delete
+the new thing.
+
+### The dark ground deepened to `#1A1A1A` — a LOCKED change
+
+Written up as a dated superseding amendment in `frontend_design.md` section 5.
+The four greys were **solved, not picked**: `surface`, `raised` and `line`
+reproduce the palette's designed relationships to three decimals (1.094x,
+1.264x, 1.378x against 1.095x, 1.262x, 1.382x). `#1A1A1A` is near the floor —
+below about `#171717` no lighter grey lands on the 1.095x `surface`
+relationship, so deeper means redesigning the ramp.
+
+**It repaired a live failure.** `dim` on `raised` measured **4.43:1** against a
+4.5:1 floor, shipped, missed because the original pass compared every token
+against the *ground* and not the surfaces it sits on. Now 4.90:1. `accent-ink`,
+the brand panel's two dark stops and the favicon tile all hard-code the ground
+and moved with it; the panel's lightest stop is untouched, so every `panel-*`
+ratio still holds. Light theme untouched.
+
+### The friction on the way in
+
+`/app`'s title form is gone. It is the same `StartPane` as an empty
+conversation, so the prompt does not move between screens. **Nothing is created
+until something is sent**, or the sidebar fills with untouched `Untitled`s.
+Titles are **derived from the first message** — truncation at a word boundary,
+48 characters, only over the server's `Untitled`, only from the root; a
+generated title needs a key or every conversation gets named by the fake. The
+title is set in the **create call**, not PATCHed after, which removed a visible
+`Untitled`-then-correct flicker and a request.
+
+**The flicker fix, and a mistake inside it.** The receiving page rendered three
+states for one keystroke: `Loading thread`, then the empty prompt, then the
+message. It now draws the handed-off text immediately as a user turn and does
+not wait on the graph at all. My first version guarded the send with a **state
+flag**, which would have posted the first message *twice* — React re-runs that
+effect on mount in development with the same closure, so a state flag still
+reads false on the second run. It is a ref, which is written synchronously and
+read at call time. That is why the original had one.
+
+### The sidebar
+
+Rows went from two lines to one, ~46px to ~30px, timestamp into the tooltip.
+The column now **collapses and stays collapsed** (`localStorage`, read in a
+`useState` initialiser so it does not snap shut after first paint). Collapsed
+and drawer-open are **separate states**: one shared flag would mean collapsing
+on a desktop disarms the drawer button on a phone.
+
+### A strategy switch, and a control that had to be hand-built
+
+`PATCH /conversations/{id}` has accepted `default_strategy` since the
+conversation layer, so the switch drives an existing route — the same argument
+that justified slice 2 rendering the detail page. It is **not** slice 6's
+picker. It lives in the prompt box, beside the field, because it governs what
+the next thing you send will do.
+
+**The native `select` had to go.** Its dropdown is drawn by the OS, not the
+document: `option { background-color }` is ignored by Chrome on Windows and the
+row highlight is unreachable from CSS, so the popup arrived as a white card
+with a system-blue bar. Two cheaper fixes were tried and both failed, and they
+failed because those pixels are outside the page. `MenuSelect` replaces it — a
+button, a list, and the keyboard handling that makes them a listbox, with focus
+held on the button and `aria-activedescendant` tracking the active row. No
+dependency. It carries the **only shadow in the app**, and opens upward
+unconditionally.
+
+**Mono is for values being *reported*, not chosen.** The picker and the facts
+line are in the sans; the metadata under a stored reply stays mono. The same
+strategy name in two faces is the distinction, not an inconsistency.
+
+### Fonts
+
+**Hanken Grotesk** for the interface, **Source Serif 4** for model replies and
+hero headlines, **IBM Plex Mono** unchanged. The request was Claude's own
+faces; **Copernicus and Styrene are licensed, not on Google Fonts, and not ours
+to bundle**, so these are the closest open equivalents. If the real ones are
+ever licensed, only two `--font-*` variables change.
+
+**The reversal worth noticing:** section 4 said the serif is *never* used for
+body copy. It is now, in one place — what the model writes. The reader's own
+messages stay in the sans, and that split is what separates what was written
+for you from what you wrote, with no label and no colour doing the work.
+Replies went 15px/1.68 to 16.5px/1.62, because a text serif needs more size and
+less leading than a grotesque.
+
+### One process note
+
+**A file I had built and verified silently disappeared from disk** mid-session
+— `ui/select.tsx` and the `StrategyControl` in `conversation.tsx` were both
+gone an hour after a clean build. The build had passed at the time, and the
+curl check I ran alongside it only exercised the backend `PATCH` route, which
+existed regardless. **A passing backend check proves nothing about whether the
+frontend calling it is on disk.** Both were rebuilt and the on-disk state
+grepped afterwards.
+
+**Loose end:** `features/conversations/strategy-tag.tsx` is now used nowhere —
+the picker replaced its last caller. Left in place because slice 5's tree and
+slice 6's inspector are both likely to want it.
+
+**Next:** **frontend slice 4 — span branching**. Unblocked: the edge and anchor
+routes have been done since the message layer.

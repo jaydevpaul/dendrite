@@ -1,5 +1,5 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
-import { LogOut, Plus } from "lucide-react";
+import { LogOut, PanelLeftClose, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -16,7 +16,15 @@ import { useConversations } from "@/features/conversations/queries";
  * else you have open beside it. The tree of branches inside one conversation is
  * a different navigator and gets its own slice.
  */
-export function ConversationSidebar({ onNavigate }: { onNavigate?: () => void }) {
+export function ConversationSidebar({
+  onNavigate,
+  onCollapse,
+}: {
+  /** Closes the drawer after a navigation. Only the drawer passes this. */
+  onNavigate?: () => void;
+  /** Hides the column. Only the column passes this; the drawer has its X. */
+  onCollapse?: () => void;
+}) {
   const navigate = useNavigate();
   const { data: user } = useMe();
   const { data: conversations, isPending, isError, refetch } = useConversations();
@@ -24,10 +32,22 @@ export function ConversationSidebar({ onNavigate }: { onNavigate?: () => void })
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 px-4 pt-4 pb-3">
-        <Link to="/" className="rounded-sm" onClick={onNavigate}>
+      <div className="flex items-center gap-2 px-3 pt-4 pb-3">
+        <Link to="/" className="ml-1 rounded-sm" onClick={onNavigate}>
           <Logo size="sm" />
         </Link>
+        {onCollapse ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto px-2"
+            onClick={onCollapse}
+            aria-label="Hide conversations"
+            title="Hide conversations"
+          >
+            <PanelLeftClose />
+          </Button>
+        ) : null}
       </div>
 
       <div className="px-3 pb-3">
@@ -69,26 +89,21 @@ export function ConversationSidebar({ onNavigate }: { onNavigate?: () => void })
               <NavLink
                 to={`/app/c/${conversation.id}`}
                 onClick={onNavigate}
+                title={`${conversation.title}\n${formatRelativeTime(
+                  conversation.updated_at,
+                )} · ${formatAbsoluteTime(conversation.updated_at)}`}
                 className={({ isActive }) =>
                   cn(
-                    "block rounded-md border-l-2 px-[10px] py-2 transition-colors",
+                    "block truncate rounded-md border-l-2 px-[10px] py-[6px] text-[13px] leading-[1.4] transition-colors",
                     // The accent marks the thing you are in, which is the same
                     // job it does for a branch edge and the current node.
                     isActive
-                      ? "border-accent bg-accent-tint"
-                      : "border-transparent hover:bg-raised",
+                      ? "border-accent bg-accent-tint font-medium text-ink"
+                      : "border-transparent text-muted hover:bg-raised hover:text-ink",
                   )
                 }
               >
-                <span className="block truncate text-[13px] leading-[1.35] font-medium text-ink">
-                  {conversation.title}
-                </span>
-                <span
-                  className="mt-[2px] block font-mono text-[10px] text-dim"
-                  title={formatAbsoluteTime(conversation.updated_at)}
-                >
-                  {formatRelativeTime(conversation.updated_at)}
-                </span>
+                {conversation.title}
               </NavLink>
             </li>
           ))}

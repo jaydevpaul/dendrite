@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/lib/api";
+import {
+  DEFAULT_TITLE,
+  titleFromMessage,
+  updateConversation,
+  type Conversation,
+} from "@/features/conversations/api";
 import { conversationKeys } from "@/features/conversations/queries";
 import { createMessage, generatePath, type AnyStrategy, type StrategySource } from "./api";
 import { appendCreatedMessage, messageKeys } from "./queries";
@@ -61,6 +67,32 @@ export function useChat(conversationId: string) {
     () =>
       queryClient.refetchQueries({ queryKey: messageKeys.graph(conversationId) }),
     [queryClient, conversationId],
+  );
+
+  /**
+   * Name the conversation after its first message, if it still has the server
+   * default name. Best-effort: a failed rename is cosmetic, and it must never
+   * take the message that was just written down with it.
+   */
+  const nameFromFirstMessage = useCallback(
+    async (text: string) => {
+      const conversation = queryClient.getQueryData<Conversation>(
+        conversationKeys.detail(conversationId),
+      );
+      // No cached conversation means this hook cannot know whether the name is
+      // the default one, and guessing would overwrite a real title.
+      if (conversation === undefined || conversation.title !== DEFAULT_TITLE) return;
+
+      try {
+        const renamed = await updateConversation(conversationId, {
+          title: titleFromMessage(text),
+        });
+        queryClient.setQueryData(conversationKeys.detail(conversationId), renamed);
+      } catch {
+        // Leave it called Untitled. The user can rename it from the header.
+      }
+    },
+    [conversationId, queryClient],
   );
 
   const generate = useCallback(
@@ -170,6 +202,12 @@ export function useChat(conversationId: string) {
         });
 
         appendCreatedMessage(queryClient, conversationId, created);
+
+        // The root message is the one that names the conversation. Awaited
+        // before the list is invalidated so the sidebar refetches once, with
+        // the new name already on the row.
+        if (parentMessageId === null) await nameFromFirstMessage(text);
+
         // Writing a message moves the conversation's updated_at, which is the
         // sidebar list's sort key -- so the list is genuinely stale, not just
         // showing an old label.
@@ -186,7 +224,7 @@ export function useChat(conversationId: string) {
         setSending(false);
       }
     },
-    [conversationId, queryClient, generate],
+    [conversationId, queryClient, generate, nameFromFirstMessage],
   );
 
   return {

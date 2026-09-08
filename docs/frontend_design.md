@@ -190,12 +190,31 @@ avoidable by naming its components:
   purple→blue hero gradient specifically.
 - ~~Gradient backgrounds of any kind.~~ **Amended 2026-08-30 — gradients are
   permitted, constrained to the warm/moss family.** Two are defined, both in
-  `index.css`: `.brand-panel` (the auth side panel) and `.hero-wash` (a faint
-  moss glow behind the landing hero). The constraint that replaced the ban:
-  **contrast is verified against every stop, not the average.** That check is
-  not theoretical — it caught `dim` at 4.20:1 against the panel's lightest
+  `index.css`: `.brand-panel` (the auth side panel) and `.hero-wash` (the
+  landing hero and the app's start surface). The constraint that replaced the
+  ban: **contrast is verified against every stop, not the average.** That check
+  is not theoretical — it caught `dim` at 4.20:1 against the panel's lightest
   stop, which is why the panel has its own fixed `panel-*` tokens and never
   uses `dim`.
+
+  **Amended 2026-09-08 — `.hero-wash` strengthened, and given per-theme
+  pigment.** At 0.09/0.05 it measured exactly as designed and read as nothing
+  at all on screen; the brand panel beside it in the login flow is what a
+  gradient in this palette is supposed to look like. It is now a directional
+  sweep plus two corner glows, driven by `--wash-*` custom properties so the
+  two themes differ in pigment as well as strength: dark tints with the accent
+  moss to a 0.199 peak, light with its own darker accent to 0.102. **The dark
+  moss is not reused in light** — over warm paper it composites to a pale mint,
+  which is the one thing this palette must not look like.
+
+  Measured against the worst stop, both themes: `ink` 8.29:1 / 14.37:1,
+  `muted` 4.62:1 / 4.70:1, `accent` 5.19:1 / 4.92:1. **`dim` fails on the wash**
+  — 3.67:1 and 3.93:1 — so it is not used there, exactly as on the panel. That
+  cost two edits: the landing hero's stats row moved its values to `muted` and
+  its labels to `ink` (which also puts that hierarchy the right way round), and
+  the app's start surface moved three labels off `dim`. `muted` now has only
+  0.12 and 0.20 of headroom, so raising the alphas again means re-measuring
+  rather than eyeballing.
 - Glassmorphism — frosted translucent panels with backdrop blur.
 - Emoji used as iconography or in headings.
 - Untouched shadcn/Tailwind defaults. If the theme tokens are stock, it will
@@ -248,13 +267,49 @@ which is what lets the same mark sit on the app ground, the gradient brand
 panel, and a white surface with no per-context variant. The favicon is the only
 place colour is hard-coded, because a favicon has no inherited context.
 
-**Typography:** avoid the default-Inter-everywhere look. **IBM Plex Sans** for
-UI, **IBM Plex Mono** for token counts, model names, IDs and strategy labels,
-and — added 2026-08-30 — **IBM Plex Serif** for hero and section headlines
-only. The serif is what stops the landing page reading as a dashboard; keeping
-it inside the same superfamily makes it a coherent third voice rather than an
-unrelated pairing. It is never used for body copy or UI. Always give the font
-stack a real system fallback.
+**Typography:** avoid the default-Inter-everywhere look. ~~**IBM Plex Sans**
+for UI, **IBM Plex Mono** for token counts, model names, IDs and strategy
+labels, and — added 2026-08-30 — **IBM Plex Serif** for hero and section
+headlines only. The serif is what stops the landing page reading as a
+dashboard; keeping it inside the same superfamily makes it a coherent third
+voice rather than an unrelated pairing. It is never used for body copy or
+UI.~~ Always give the font stack a real system fallback.
+
+**Amended 2026-09-08 — the sans and the serif both changed, and the serif's
+job changed with them.**
+
+| Face | Where |
+|---|---|
+| **Hanken Grotesk** | All interface text. Replaces IBM Plex Sans. |
+| **Source Serif 4** | Model replies, and hero and section headlines. Replaces IBM Plex Serif. |
+| **IBM Plex Mono** | Unchanged — token counts, model names, ids, strategy labels. |
+
+**What was asked for and why it could not be done.** The request was Claude's
+own fonts. Its reply text is **Copernicus** and its interface is **Styrene
+A/B**; both are commercially licensed, neither is on Google Fonts, and neither
+is ours to bundle. So this is a substitution, chosen for the closest open
+equivalents: Source Serif 4 has Copernicus's moderate contrast and sturdy text
+weight, and Hanken Grotesk sits in Styrene's geometric-grotesque territory.
+**If the real faces are ever licensed, only these two `--font-*` variables
+change** — nothing reads a family name directly.
+
+**The reversal worth noticing: the serif is now used for body copy.** The
+sentence above said it never would be. It does now, and only in one place —
+what the model writes. A serif for prose and a sans for the controls around it
+is the oldest distinction in typesetting, and here it earns its keep twice
+over: it separates what was written *for* the reader from what the reader
+wrote themselves, with no label and no colour doing that work, and it makes a
+reply read as a document rather than as output in a panel. The reader's own
+messages stay in the sans for exactly that reason.
+
+**Superfamily coherence was the cost.** The old trio were one family in three
+voices, which is a real argument and it is being given up deliberately: two
+unrelated families, paired on contrast rather than on shared origin. Replies
+also went from 15px/1.68 to 16.5px/1.62, because a text serif needs more size
+and less leading than a grotesque to hold the same optical weight.
+
+Sizes went up by one step, so nothing in section 5 needs re-measuring — a
+typeface change moves no colour.
 
 ---
 
@@ -286,19 +341,19 @@ and accent carry the identity.
 
 | Token | Hex | Ratio vs ground | Use |
 |---|---|---|---|
-| `ground` | `#232323` | — | Page ground — neutral, no cast |
-| `surface` | `#2A2A2A` | 1.09× | Cards, inputs |
-| `raised` | `#343434` | 1.26× | Hover, prompt zone, raised surfaces |
-| `line` | `#3A3A3A` | 1.54:1 | **Dividers only** — see the warning below |
-| `line-strong` | `#837E74` | 3.89:1 | Control edges (inputs, secondary buttons) |
-| `ink` | `#EDE6D6` | 12.64:1 | Primary text — warm paper tone |
-| `muted` | `#B5AD9A` | 7.04:1 | Secondary text; **fidelity decay step 1** |
-| `dim` | `#A09A88` | 5.59:1 | Metadata; **fidelity decay step 2** |
-| `accent` | `#9BC47A` | 7.91:1 | Branch edges, current node, primary action |
+| `ground` | `#1A1A1A` | — | Page ground — neutral, no cast |
+| `surface` | `#222222` | 1.09× | Cards, inputs |
+| `raised` | `#2D2D2D` | 1.26× | Hover, prompt zone, raised surfaces |
+| `line` | `#333333` | 1.38:1 | **Dividers only** — see the warning below |
+| `line-strong` | `#837E74` | 4.31:1 | Control edges (inputs, secondary buttons) |
+| `ink` | `#EDE6D6` | 14.00:1 | Primary text — warm paper tone |
+| `muted` | `#B5AD9A` | 7.80:1 | Secondary text; **fidelity decay step 1** |
+| `dim` | `#A09A88` | 6.19:1 | Metadata; **fidelity decay step 2** |
+| `accent` | `#9BC47A` | 8.76:1 | Branch edges, current node, primary action |
 | `accent-hover` | `#B4D998` | — | Hover / pressed |
-| `accent-ink` | `#232323` | 7.91:1 | Text on a filled accent surface |
-| `danger` | `#E58358` | 5.78:1 | Destructive actions, errors |
-| `warn` | `#DDC172` | 8.94:1 | Semantic only — never decorative |
+| `accent-ink` | `#1A1A1A` | 8.76:1 | Text on a filled accent surface |
+| `danger` | `#E58358` | 6.40:1 | Destructive actions, errors |
+| `warn` | `#DDC172` | 9.90:1 | Semantic only — never decorative |
 | `scrim` | `rgb(0 0 0 / 0.58)` | — | Behind an overlay panel — added 2026-09-08 |
 
 ### Light
@@ -338,11 +393,49 @@ rule between rows. It is *not* correct for the edge of a text input, where the
 border is the only thing indicating where to click. Never draw a control edge
 with `line`.
 
-**Lifting the ground spends contrast.** An earlier near-black ground
-(`#191714`) gave 14.39:1 on text; moving to `#232323` cost roughly 1.7 points
-across every token and pushed `dim` and `line-strong` below their floors, which
-is why both were lifted from their original values. If the ground ever changes
-again, re-measure every pair — do not assume.
+**The ground's depth is the palette's contrast budget.** The original
+near-black (`#191714`) gave 14.39:1 on text; lifting it to `#232323` cost about
+1.7 points across every token and pushed `dim` and `line-strong` below their
+floors, which is why both were lifted from their original values. Deepening it
+again to `#1A1A1A` on 2026-09-08 handed roughly 1.4 of those points back — see
+the amendment below. Either direction, **re-measure every pair; do not
+assume.** The `dim`-on-`raised` failure was found that way and would not have
+been found any other way.
+
+**Amended 2026-09-08 — the dark ground deepened to `#1A1A1A`.** Supersedes the
+`#232323` row above; the lock stands, this is the written superseding entry it
+requires. The reason was that the app read as mid-grey rather than as night,
+next to references that sit much deeper.
+
+**The four greys were solved, not picked.** The three relationships the palette
+was designed around are preserved to three decimal places: `surface` sits
+1.094× above the ground (was 1.095×), `raised` 1.264× (was 1.262×), `line`
+1.378× (was 1.382×). Only the depth changed, so every surface still separates
+from every other one by the amount it was designed to. **`#1A1A1A` is also
+about the floor**: below roughly `#171717` no lighter grey lands on the 1.095×
+`surface` relationship at all, so a deeper ground would mean redesigning the
+ramp rather than moving it.
+
+**It repaired a live failure.** `dim` on `raised` measured **4.43:1** against a
+4.5:1 floor — shipped, and missed because the original measurement pass
+compared each token against the *ground* rather than against every surface it
+actually sits on. It is now 4.90:1. Every token now clears its floor on all
+three surfaces: worst cases are `dim` 4.90:1 and `line-strong` 3.41:1, both on
+`raised`.
+
+**Two follow-ons.** `accent-ink` is the page colour punched out of a filled
+accent, so it moved with the ground (`#1A1A1A`, 8.76:1 on the accent). The
+brand panel's gradient landed its 70% stop exactly on the old ground; left
+alone it would have read as *lighter* than the page beside it, so its two dark
+stops moved to `#1A1A1A` and `#141310`. Its lightest stop is untouched, and
+that is the one every `panel-*` token was measured against — `panel-ink`
+9.48:1, `panel-muted` 5.28:1, `panel-accent` 5.94:1, unchanged. The favicon's
+tile, which hard-codes the ground because a favicon has no inherited context,
+moved too.
+
+**The light theme is untouched.** The request was for a darker background; light
+is warm paper, and darkening it is not the same change — it would be a
+different concept, not a deeper one.
 
 Ratios above were computed directly (WCAG relative luminance), not estimated.
 Body text targets 4.5:1 and interactive boundaries 3:1, in **both** themes.
@@ -476,6 +569,7 @@ src/
 │   └── strategy-tag.tsx           the strategy name, in mono
 └── routes/
     ├── conversations.tsx          /app       list + composer + empty state
+    │                                             (removed 2026-09-08 — see slice 3)
     └── conversation.tsx           /app/c/:id detail + rename
 ```
 
@@ -541,16 +635,140 @@ src/
 │   ├── use-chat.ts                send, generate, live run, per-run records
 │   ├── message-turn.tsx           one turn, its run metadata, its hidden kin
 │   └── composer.tsx               the prompt zone
+│   ├── start-pane.tsx             the prompt with nothing above it
+│   └── composer.tsx               the prompt zone, two shapes
+├── components/
+│   ├── ui/menu-select.tsx         a listbox whose list is part of the page
+│   └── conversation-sidebar.tsx   collapsible, persisted
+├── lib/sidebar.ts                 the collapsed preference
 └── routes/
-    ├── conversations.tsx          /app       now "start a conversation"
+    ├── new-conversation.tsx       /app       the prompt, and nothing else
     └── conversation.tsx           /app/c/:id the thread
 ```
 
-**The list is a sidebar, and `/app` is a start surface.** The app should read
-the way a chat app reads — a thread you are in, everything else you have open
-beside it — so the list moved into the shell, and the old list page kept the one
-thing a sidebar cannot do: name a new graph and open it. The API layer, the
-query hooks and the row markup carried over unchanged; only the frame is new.
+**Revised 2026-09-08.** `routes/conversations.tsx` — the title form — is gone,
+and the sections below carry the change. What shipped first asked for a title
+on its own screen with the thread a click further on; that was a form standing
+between the user and the thing they came to do, for a field that is now filled
+in from the first message anyway.
+
+**The list is a sidebar, and `/app` is the prompt.** The app should read the
+way a chat app reads — a thread you are in, everything else you have open
+beside it — so the list moved into the shell. `/app` is `StartPane`: a short
+greeting and a centred prompt over a soft glow, the same component an empty
+conversation renders, so typing there and pressing Enter does not make the
+prompt jump to a different place on the next screen.
+
+**Nothing is created until something is sent.** `/app` creating a conversation
+on mount would leave an empty row behind every time that page was opened and
+abandoned, and the sidebar would fill with untouched `Untitled`s. The order is
+create, then navigate, then send — and **the typed text rides along in history
+state** rather than being posted from `/app`, because posting it there would
+mean streaming the reply into a component that is about to unmount, which
+aborts it. The receiving side drops it out of history before sending, so a
+reload or a back-navigation cannot post the same first message twice, and a ref
+guards the development double-effect.
+
+**A conversation is named from its first message.** Only when the name is still
+exactly the server's `Untitled`, so a title typed or renamed to is never
+overwritten, and only from the root message. It is **truncation, not
+summarisation**: whitespace collapsed, cut at a word boundary, 48 characters.
+The tools that read like this ask a model for a short title, and doing that here
+would mean either a second provider call per conversation or — with no key
+today — a title written by the fake, so every conversation would be called *"A
+fake reply in two parts."* A failed rename is swallowed: it is cosmetic, and it
+must not take the message that was just written down with it. When there is a
+real key, swapping in a generated title is one function.
+
+*Consequence, accepted:* the strategy is no longer announced before a
+conversation exists. The old form said "strategy: server default" next to its
+create button. The header shows the strategy from the moment there is anything
+to show, so nothing is hidden — it is just not pre-announced, and that is worth
+one less thing on an empty screen.
+
+**The sidebar collapses, and stays collapsed** (added 2026-09-08). The
+`PanelLeftClose` button in its top row hides the column; a `PanelLeft` button
+takes its place at the top-left of the thread pane to bring it back. The
+preference is in `localStorage` and is read in a `useState` initialiser rather
+than an effect — read it in an effect and the sidebar renders open on every
+load and then snaps shut.
+
+**Collapsed and drawer-open are separate states**, because the list is two
+different things at two widths. One shared flag would mean collapsing the
+column on a desktop also disarms the drawer button on a phone. One button
+reveals it either way, and both state changes are harmless in the layout that
+does not own them — the drawer is `lg:hidden`, the column is `lg:block`.
+
+**The chat page was stripped down** (2026-09-08), against Claude's as a
+reference. Off it came: the bordered header band and its message-count line,
+the `DENDRITE` role label over every reply, `conversation default` and the
+model name from the metadata line (now in its tooltip), the composer's raised
+band and top border, and the `Enter sends` hint everywhere except the empty
+state — the one place the convention is worth teaching. What is left in the
+header is the title and a rename pencil.
+
+**The conversation's own facts sit under the prompt, not over the thread.**
+Message count, created and updated, as one centred line of plain text where
+Claude puts its disclaimer. They were behind a disclosure first, which is a
+click and a panel to read two timestamps; and above the thread before that,
+which put settings between the reader and the thing they came to read. **The
+conversation id is not shown at all** — it is in the address bar, and a uuid
+was the widest thing on the row for something nobody reads off a screen.
+
+**A strategy switch, in the prompt box.** `PATCH /conversations/{id}` has
+accepted `default_strategy` since the conversation layer, so this drives a
+route that already exists — the same argument that justified slice 2 rendering
+the detail page. It is **not** slice 6's picker, which chooses at creation time
+and shows the composed context and token cost beside each arm so the choice can
+be made on evidence. `SpanOnly` is absent because it is branch-only and the API
+answers 422 for it. *Consequence:* there is still no way to choose before the
+first message, because on `/app` no conversation exists yet to PATCH.
+
+**`MenuSelect`, and why it is not a `select`.** A native `select` cannot be
+themed: its dropdown is drawn by the OS, not the document. `option {
+background-color }` is honoured by some browsers and ignored by Chrome on
+Windows, and the row highlight is never reachable from CSS at all — the popup
+arrived as a white card with a system-blue bar in the middle of a dark app.
+Two cheaper fixes were tried first and both failed, and the reason they failed
+is that those pixels are outside the page. `MenuSelect` is a button, a list and
+the keyboard handling that makes them a listbox: arrows, Home/End, Enter,
+Escape, Tab, click-outside, with focus held on the button and the active row
+tracked by `aria-activedescendant`. Still no dependency. It carries **the only
+shadow in the app** — a popup is the one place elevation does real work rather
+than decorating — and it opens upward unconditionally, because the only place
+it is used is the prompt box at the bottom of the viewport.
+
+**Mono is for values being *reported*, not values being *chosen*.** The picker
+and the facts line are in the interface sans even though the picker's values
+are identifiers; the metadata under a stored reply stays mono. So the same
+strategy name appears in two faces, and that is the distinction rather than an
+inconsistency: a control typeset as data reads as something to look at rather
+than something to operate.
+
+**Sidebar rows are one line** (revised 2026-09-08). They shipped as two — title
+over a relative timestamp — which is roughly 46px a row against about 30px for
+the same list in any other chat app. A relative timestamp is not what anyone
+scans a list by, so it moved into the row's tooltip alongside the absolute
+time, where it costs no height. Inactive rows read `muted` and go to `ink` on
+hover, so the active row is the only bright one.
+
+**One gradient, on every entry surface, and none in the thread.**
+`.hero-wash` carries the landing hero, `/app`, and an empty conversation.
+
+A second gradient was tried for the empty conversation and reverted the same
+day: a centred radial bloom, the shape other chat tools put behind their
+prompt. Two lessons kept from it. The mechanical one — **a two-stop radial
+bands on a dark ground, and two of them crossing shows as a mottled corner**;
+if a radial is ever wanted here, it needs an eased four-stop falloff and a
+single centre. The one that actually mattered — **it was a different gradient
+language.** The brand panel is directional, the wash is directional, and a
+centred bloom in the middle of them read as borrowed from somewhere else. Fit
+beat novelty, and the fix was to delete the new thing rather than tune it.
+
+The thread and the sidebar stay flat on purpose: in there, ink strength carries
+fidelity decay, the accent marks branches and the current node, and the
+anchored span has to stay the loudest thing on screen. A gradient behind that
+competes with all three.
 
 The shell now owns the viewport height and hides its own overflow, so the
 thread scrolls inside its pane and the prompt zone stays put. A page that

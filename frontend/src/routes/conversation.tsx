@@ -7,21 +7,30 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Check, Pencil, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FormAlert } from "@/components/ui/form-alert";
 import { Input } from "@/components/ui/input";
+import { MenuSelect } from "@/components/ui/menu-select";
 import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
-import { TITLE_MAX_LENGTH, type Conversation } from "@/features/conversations/api";
+import {
+  NON_SPAN_STRATEGIES,
+  TITLE_MAX_LENGTH,
+  type Conversation,
+} from "@/features/conversations/api";
 import {
   useConversation,
   useUpdateConversation,
 } from "@/features/conversations/queries";
-import { StrategyTag } from "@/features/conversations/strategy-tag";
 import { Composer } from "@/features/messages/composer";
-import { MessageTurn, StreamingTurn } from "@/features/messages/message-turn";
+import {
+  MessageTurn,
+  PendingUserTurn,
+  StreamingTurn,
+} from "@/features/messages/message-turn";
 import { useConversationGraph } from "@/features/messages/queries";
+import { StartPane } from "@/features/messages/start-pane";
 import { buildThread, findGap } from "@/features/messages/thread";
 import { useChat } from "@/features/messages/use-chat";
 
@@ -50,6 +59,35 @@ function Chat({ conversationId }: { conversationId: string }) {
   const conversation = useConversation(conversationId);
   const graph = useConversationGraph(conversationId);
   const chat = useChat(conversationId);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [renaming, setRenaming] = useState(false);
+
+  // A message typed on the start surface, before this conversation existed to
+  // send it to. Read once, on mount, so that clearing it out of history below
+  // cannot take it away again mid-flight.
+  const [handoff] = useState(
+    () => (location.state as { firstMessage?: string } | null)?.firstMessage,
+  );
+  // A ref, not state, and that distinction is load-bearing. React re-runs this
+  // effect a second time on mount in development, reusing the same closure --
+  // so a state flag still reads false on the second run and the first message
+  // is posted twice. A ref is written synchronously and read at call time.
+  const handoffSent = useRef(false);
+  const send = chat.send;
+
+  useEffect(() => {
+    if (handoff === undefined || handoffSent.current) return;
+    // Sending does not wait for the graph. A handed-off message is by
+    // definition the first one in a conversation that was just created, so
+    // its parent is null either way, and waiting would put a loading state on
+    // screen for no information.
+    handoffSent.current = true;
+    // Drop it out of history before sending, so a reload or a
+    // back-navigation cannot post the same first message a second time.
+    navigate(location.pathname, { replace: true, state: null });
+    void send(handoff, null);
+  }, [handoff, navigate, location.pathname, send]);
 
   const thread = useMemo(
     () => (graph.data === undefined ? null : buildThread(graph.data)),
@@ -71,62 +109,121 @@ function Chat({ conversationId }: { conversationId: string }) {
     live.assistantMessageId !== null &&
     (thread?.steps.some((step) => step.message.id === live.assistantMessageId) ?? false);
 
+  // The handed-off text, shown until the write comes back and the real row
+  // takes over. Without this the receiving page renders a loading line, then
+  // the start prompt with an empty field, then the message -- three states for
+  // one keystroke, which is the flicker.
+  // Dropped again if the write fails, so a message that never landed does not
+  // sit on screen looking written. The pane falls back to the prompt with the
+  // failure above it -- the typed text is lost, which is the accepted cost of
+  // not lying about what was saved.
+  const inbound =
+    handoff !== undefined &&
+    chat.error === null &&
+    (thread === null || thread.steps.length === 0)
+      ? handoff
+      : undefined;
+
+  // Nothing written yet, and nothing arriving. The prompt belongs in the
+  // middle of the pane rather than pinned to the bottom of an empty one.
+  const isEmpty =
+    thread !== null &&
+    thread.steps.length === 0 &&
+    live === null &&
+    !graph.isPending &&
+    inbound === undefined;
+
+  const sendToTail = (text: string) =>
+    void send(text, thread?.tail?.message.id ?? null);
+
+  const sendError =
+    chat.error === null ? null : (
+      <div className="mx-auto flex w-full max-w-3xl items-start gap-2">
+        <FormAlert className="flex-1">{chat.error}</FormAlert>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="px-2"
+          onClick={chat.dismissError}
+          aria-label="Dismiss"
+          title="Dismiss"
+        >
+          <X />
+        </Button>
+      </div>
+    );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {conversation.data ? (
-        <Header
+        renaming ? (
+          <div className="px-4 pt-3 pb-1 sm:px-6">
+            <div className="mx-auto max-w-3xl">
+              <RenameForm
+                conversation={conversation.data}
+                onDone={() => setRenaming(false)}
+              />
+            </div>
+          </div>
+        ) : (
+          <Header
+            conversation={conversation.data}
+            onRename={() => setRenaming(true)}
+          />
+        )
+      ) : (
+        <div className="h-[36px]" />
+      )}
+
+      {isEmpty ? (
+        <StartPane error={sendError} onSend={sendToTail} disabled={chat.isBusy} />
+      ) : (
+        <>
+          <Thread
+            inbound={inbound}
+            // A handed-off message is already on screen, so the thread is not
+            // waiting on anything the reader can see.
+            pending={graph.isPending && inbound === undefined}
+            steps={thread?.steps ?? []}
+            records={chat.records}
+            live={live}
+            liveIsStored={liveIsStored}
+            gap={gap}
+            onGenerate={chat.generate}
+            busy={chat.isBusy}
+            loadError={graph.error === null ? null : graph.error.message}
+            onRetryLoad={() => void graph.refetch()}
+          />
+
+          {sendError ? <div className="px-4 pt-3 sm:px-6">{sendError}</div> : null}
+
+          <Composer
+            onSend={sendToTail}
+            disabled={graph.isPending || chat.isBusy}
+            placeholder="Reply"
+            controls={
+              conversation.data ? (
+                <StrategyControl conversation={conversation.data} />
+              ) : null
+            }
+          />
+        </>
+      )}
+
+      {/* The last row of the column in both shapes, so it sits under whichever
+          prompt is on screen. */}
+      {conversation.data ? (
+        <ConversationFacts
           conversation={conversation.data}
           messageCount={thread?.steps.length ?? 0}
         />
-      ) : (
-        <div className="h-[57px] border-b border-line" />
-      )}
-
-      <Thread
-        pending={graph.isPending}
-        steps={thread?.steps ?? []}
-        records={chat.records}
-        live={live}
-        liveIsStored={liveIsStored}
-        gap={gap}
-        onGenerate={chat.generate}
-        busy={chat.isBusy}
-        loadError={graph.error === null ? null : graph.error.message}
-        onRetryLoad={() => void graph.refetch()}
-      />
-
-      {chat.error !== null ? (
-        <div className="px-4 pt-3 sm:px-6">
-          <div className="mx-auto flex max-w-3xl items-start gap-2">
-            <FormAlert className="flex-1">{chat.error}</FormAlert>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="px-2"
-              onClick={chat.dismissError}
-              aria-label="Dismiss"
-              title="Dismiss"
-            >
-              <X />
-            </Button>
-          </div>
-        </div>
       ) : null}
-
-      <Composer
-        onSend={(text) => void chat.send(text, thread?.tail?.message.id ?? null)}
-        disabled={graph.isPending || chat.isBusy}
-        placeholder={
-          thread !== null && thread.steps.length === 0
-            ? "Start this conversation"
-            : "Reply"
-        }
-      />
     </div>
   );
 }
 
 function Thread({
+  inbound,
   pending,
   steps,
   records,
@@ -138,6 +235,7 @@ function Thread({
   loadError,
   onRetryLoad,
 }: {
+  inbound: string | undefined;
   pending: boolean;
   steps: ReturnType<typeof buildThread>["steps"];
   records: ReturnType<typeof useChat>["records"];
@@ -165,7 +263,7 @@ function Thread({
     const element = scrollRef.current;
     if (element === null || !pinned.current) return;
     element.scrollTop = element.scrollHeight;
-  }, [steps.length, live?.text, live?.phase, gap?.kind]);
+  }, [steps.length, live?.text, live?.phase, gap?.kind, inbound]);
 
   return (
     <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
@@ -187,9 +285,7 @@ function Thread({
           </div>
         ) : null}
 
-        {!pending && loadError === null && steps.length === 0 && live === null ? (
-          <EmptyThread />
-        ) : null}
+        {inbound !== undefined ? <PendingUserTurn text={inbound} /> : null}
 
         {steps.map((step) => (
           <MessageTurn
@@ -258,90 +354,114 @@ function Gap({
   );
 }
 
-function EmptyThread() {
+function Header({
+  conversation,
+  onRename,
+}: {
+  conversation: Conversation;
+  onRename: () => void;
+}) {
   return (
-    <div className="pt-4">
-      <h2 className="mb-2 text-[19px] leading-[1.25] font-semibold tracking-[-0.015em]">
-        Nothing here yet
-      </h2>
-      <p className="max-w-[58ch] text-[14px] leading-[1.6] text-muted">
-        Ask the first question below. Every reply becomes a node you can branch
-        from later, and the context a branch inherits is composed rather than
-        copied.
-      </p>
+    <div className="px-4 pt-3 pb-1 sm:px-6">
+      <div className="mx-auto flex max-w-3xl items-center gap-2">
+        <h1 className="min-w-0 flex-1 truncate text-[15px] leading-[1.3] font-semibold tracking-[-0.015em]">
+          {conversation.title}
+        </h1>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0 px-2"
+          onClick={onRename}
+          aria-label="Rename conversation"
+          title="Rename conversation"
+        >
+          <Pencil />
+        </Button>
+      </div>
     </div>
   );
 }
 
-function Header({
+/**
+ * The conversation's own facts, on the line under the prompt.
+ *
+ * Sans, not mono: "2 messages, created an hour ago" is a sentence with a
+ * number in it, not an identifier, and mono was making it look like a
+ * readout.
+ *
+ * Three short values, in plain sight. They were behind a disclosure, which
+ * meant a click and a panel to read a message count and two timestamps --
+ * more machinery than the information is worth. The conversation id is not
+ * here: it is already in the address bar, and nobody reads a uuid off a
+ * screen.
+ */
+function ConversationFacts({
   conversation,
   messageCount,
 }: {
   conversation: Conversation;
   messageCount: number;
 }) {
-  const [renaming, setRenaming] = useState(false);
-
   return (
-    <div className="border-b border-line px-4 py-3 sm:px-6">
-      <div className="mx-auto max-w-3xl">
-        {renaming ? (
-          <RenameForm conversation={conversation} onDone={() => setRenaming(false)} />
-        ) : (
-          <div className="flex items-center gap-3">
-            <h1 className="min-w-0 flex-1 truncate text-[16px] leading-[1.3] font-semibold tracking-[-0.015em]">
-              {conversation.title}
-            </h1>
-            <StrategyTag strategy={conversation.default_strategy} />
-            <Button
-              variant="ghost"
-              size="sm"
-              className="shrink-0 px-2"
-              onClick={() => setRenaming(true)}
-              aria-label="Rename conversation"
-              title="Rename conversation"
-            >
-              <Pencil />
-            </Button>
-          </div>
-        )}
-
-        {/* The facts the schema guarantees, folded away. They were a whole row
-            on the old detail page; here the thread is the content and these
-            are reference. `details` is native, so it costs no dependency. */}
-        <details className="mt-1">
-          <summary className="inline-flex cursor-pointer list-none font-mono text-[10px] tracking-[0.1em] text-dim uppercase transition-colors hover:text-muted">
-            {messageCount} {messageCount === 1 ? "message" : "messages"} &middot; details
-          </summary>
-          <dl className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1">
-            <Field label="created">
-              <span title={formatAbsoluteTime(conversation.created_at)}>
-                {formatRelativeTime(conversation.created_at)}
-              </span>
-            </Field>
-            <Field label="updated">
-              <span title={formatAbsoluteTime(conversation.updated_at)}>
-                {formatRelativeTime(conversation.updated_at)}
-              </span>
-            </Field>
-            <Field label="id">
-              <span className="break-all">{conversation.id}</span>
-            </Field>
-          </dl>
-        </details>
-      </div>
-    </div>
+    <p className="px-4 pt-2 pb-3 text-center text-[11px] text-dim sm:px-6">
+      {messageCount} {messageCount === 1 ? "message" : "messages"}
+      <Dot />
+      created{" "}
+      <span title={formatAbsoluteTime(conversation.created_at)}>
+        {formatRelativeTime(conversation.created_at)}
+      </span>
+      <Dot />
+      updated{" "}
+      <span title={formatAbsoluteTime(conversation.updated_at)}>
+        {formatRelativeTime(conversation.updated_at)}
+      </span>
+    </p>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Dot() {
+  return <span className="px-[7px] text-line-strong">&middot;</span>;
+}
+
+/**
+ * The conversation's default composition strategy, in the prompt box.
+ *
+ * It belongs beside the field for the same reason a model picker does: it is
+ * the setting that governs what the next thing you send will do, so it should
+ * be where you are about to send it from, not behind a panel somewhere else.
+ *
+ * `PATCH /conversations/{id}` has accepted this since the conversation layer,
+ * so this drives a route that already exists. It is deliberately *not* the
+ * strategy picker that belongs with the eval harness: that one chooses at
+ * creation time and shows the composed context and token cost beside each arm,
+ * so the choice can be made on evidence. This one only stops the default being
+ * unchangeable.
+ *
+ * `SpanOnly` is absent because it is branch-only -- it needs an anchor to
+ * compose from, so it can never be a conversation default, and the API answers
+ * 422 if you send it. The list mirrors the backend's, in the same order.
+ */
+function StrategyControl({ conversation }: { conversation: Conversation }) {
+  const update = useUpdateConversation(conversation.id);
+
   return (
-    <div className="min-w-0">
-      <dt className="font-mono text-[9.5px] tracking-[0.12em] text-dim uppercase">
-        {label}
-      </dt>
-      <dd className="font-mono text-[11px] text-muted">{children}</dd>
-    </div>
+    <MenuSelect
+      label="Default composition strategy"
+      // The explanation lives in the tooltip rather than beside the control:
+      // the obvious misreading is that changing this recomposes what has
+      // already been answered, and there is no room on this row for a
+      // sentence.
+      title={
+        "Composition strategy for replies generated from now on. " +
+        "Replies already in the thread keep the strategy they ran under, " +
+        "and a branch can override this."
+      }
+      value={conversation.default_strategy}
+      options={NON_SPAN_STRATEGIES}
+      disabled={update.isPending}
+      onChange={(strategy) => update.mutate({ default_strategy: strategy })}
+      className="max-w-[52vw] sm:max-w-none"
+    />
   );
 }
 

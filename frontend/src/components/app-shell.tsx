@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { PanelLeft, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand";
 import { ConversationSidebar } from "@/components/conversation-sidebar";
+import { readSidebarCollapsed, writeSidebarCollapsed } from "@/lib/sidebar";
 
 /**
  * The chrome every authenticated screen sits inside: the conversation list on
@@ -13,13 +14,33 @@ import { ConversationSidebar } from "@/components/conversation-sidebar";
  * scrolls inside its pane and the prompt zone stays put. A page that scrolled
  * as a whole would carry the composer off the bottom of the screen.
  *
- * There is still no tree of branches here -- that navigator needs the graph
- * view and gets its own slice. This is the list of conversations, not the
- * structure inside one.
+ * There is still no tree of branches here -- that navigator gets a panel of
+ * its own on the right, and its own slice. This is the list of conversations,
+ * not the structure inside one.
  */
 export function AppShell() {
+  // Two states, not one, because the list is two different things at two
+  // widths: a column that can be collapsed and stays collapsed across
+  // reloads, and below `lg` a drawer that is closed until asked for. One
+  // shared flag would mean collapsing the column also disarms the drawer
+  // button on a phone.
+  const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
+
+  // One button reveals the list, and what that means depends on the width.
+  // Both calls are harmless in the other layout: the drawer is `lg:hidden`,
+  // and the column is `lg:block`, so each ignores the state it does not own.
+  const revealList = useCallback(() => {
+    setDrawerOpen(true);
+    setCollapsed(false);
+    writeSidebarCollapsed(false);
+  }, []);
+
+  const collapseList = useCallback(() => {
+    setCollapsed(true);
+    writeSidebarCollapsed(true);
+  }, []);
 
   // Opening a conversation from the drawer has to close it, or the thread
   // renders behind a panel covering it.
@@ -36,9 +57,11 @@ export function AppShell() {
 
   return (
     <div className="flex h-dvh overflow-hidden">
-      <aside className="hidden w-[264px] shrink-0 border-r border-line lg:block">
-        <ConversationSidebar />
-      </aside>
+      {collapsed ? null : (
+        <aside className="hidden w-[264px] shrink-0 border-r border-line lg:block">
+          <ConversationSidebar onCollapse={collapseList} />
+        </aside>
+      )}
 
       {/* Below lg the list is a drawer rather than a column. Stacking it above
           the thread would push the prompt zone off the screen, and the thread
@@ -66,17 +89,30 @@ export function AppShell() {
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-line px-3 py-2 lg:hidden">
+        {/* Always present below lg, where it opens the drawer and carries the
+            wordmark the hidden sidebar would otherwise take with it. At lg and
+            above it exists only while the column is collapsed, as the way
+            back to it. */}
+        <header
+          className={
+            collapsed
+              ? "flex items-center gap-2 px-3 py-2"
+              : "flex items-center gap-2 px-3 py-2 lg:hidden"
+          }
+        >
           <Button
             variant="ghost"
             size="sm"
             className="px-2"
-            onClick={() => setDrawerOpen(true)}
-            aria-label="Open conversations"
+            onClick={revealList}
+            aria-label="Show conversations"
+            title="Show conversations"
           >
             <PanelLeft />
           </Button>
-          <Logo size="sm" />
+          <span className="lg:hidden">
+            <Logo size="sm" />
+          </span>
         </header>
 
         <main className="flex min-h-0 flex-1 flex-col">

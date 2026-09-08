@@ -16,19 +16,29 @@
    --------------------------------------------------------------------------- */
 
 @theme {
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
+  /* Three faces, changed 2026-09-08 -- see frontend_design.md section 4.
+     A grotesque for the interface, a text serif for what the model writes,
+     and the mono kept as it was for token counts, ids and strategy labels. */
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", Roboto, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", "SF Mono",
     Consolas, monospace;
-  /* Display face for hero headlines only. Same superfamily as the sans and
-     mono, so it is a coherent third voice rather than an unrelated pairing. */
-  --font-serif: "IBM Plex Serif", ui-serif, Georgia, "Times New Roman", serif;
+  /* Model replies and hero headlines. A serif for prose and a sans for the
+     controls around it is the oldest distinction in typesetting: it separates
+     what is being said from the machinery for saying it. */
+  --font-serif: "Source Serif 4", ui-serif, Charter, Georgia,
+    "Times New Roman", serif;
 
-  /* dark (default) */
-  --color-ground: #232323;
-  --color-surface: #2a2a2a;
-  --color-raised: #343434;
-  --color-line: #3a3a3a;
+  /* dark (default) -- deepened 2026-09-08, see frontend_design.md section 5.
+     The four greys were solved to preserve the relationships the palette was
+     designed around rather than picked by eye: surface sits 1.094x above the
+     ground, raised 1.264x, line 1.378x, against the previous 1.095x, 1.262x
+     and 1.382x. Only the depth changed. Going deeper than this breaks that --
+     below roughly #171717 there is no lighter grey that lands on 1.095x. */
+  --color-ground: #1a1a1a;
+  --color-surface: #222222;
+  --color-raised: #2d2d2d;
+  --color-line: #333333;
   --color-line-strong: #837e74;
 
   --color-ink: #ede6d6;
@@ -37,7 +47,7 @@
 
   --color-accent: #9bc47a;
   --color-accent-hover: #b4d998;
-  --color-accent-ink: #232323;
+  --color-accent-ink: #1a1a1a;
   --color-accent-tint: rgb(155 196 122 / 0.14);
   --color-accent-tint-firm: rgb(155 196 122 / 0.28);
 
@@ -136,25 +146,75 @@
         158deg,
         #333a2b 0%,
         #2b2f24 36%,
-        #232323 70%,
-        #1b1a17 100%
+        #1a1a1a 70%,
+        #141310 100%
       );
   }
 
-  /* Landing hero: a very faint moss wash off the top-right, so the page has
-     depth without the ground ever stopping being the ground. */
+  /* ---------------------------------------------------------------------
+     The page wash: the landing hero, and both prompt surfaces -- `/app` and an
+     empty conversation.
+
+     There was briefly a second, centred gradient for the empty conversation,
+     built to look like the glow other chat tools put behind their prompt. It
+     was wrong twice over: it read as an olive smudge on a dark ground, and
+     more to the point it was a different gradient language from the two this
+     app already had. This one is directional, the brand panel is directional,
+     and that is the house style. One gradient on every entry surface.
+
+     Strengthened 2026-09-08. At 0.09/0.05 it measured exactly as designed and
+     read as nothing at all on screen -- the ground never stopped being the
+     ground because the wash was never visible in the first place.
+
+     The tint is a variable rather than a literal, because the two themes need
+     different pigment as well as different strength. Dark tints with the
+     accent moss; light tints with its own darker accent at roughly half the
+     strength. The dark moss over warm paper composites to a pale mint, which
+     is the one thing this palette must not look like.
+
+     Peak composite is 0.199 in dark and 0.102 in light, top-right, where the
+     sweep and the glow overlap. Every token used on this surface was measured
+     against that worst stop rather than the average: ink 9.23:1, muted 5.14:1
+     and accent 5.78:1 in dark; 14.37:1, 4.70:1 and 4.92:1 in light.
+
+     `dim` measures 4.08:1 in dark and 3.93:1 in light against that stop, so it
+     is NOT used on this surface -- the same finding, and the same standing
+     rule, as the brand panel. Anything moved onto the wash goes to `muted` or
+     stronger. The deeper ground of 2026-09-08 bought about half a point here;
+     it did not buy enough for `dim`.
+     --------------------------------------------------------------------- */
   .hero-wash {
+    --wash-tint: 155 196 122;
+    --wash-sweep: 0.12;
+    --wash-glow: 0.09;
+    --wash-corner: 0.07;
+
     background:
+      /* the directional field, strongest at the top and gone by mid-page */
+      linear-gradient(
+        163deg,
+        rgb(var(--wash-tint) / var(--wash-sweep)) 0%,
+        rgb(var(--wash-tint) / calc(var(--wash-sweep) * 0.42)) 34%,
+        transparent 62%
+      ),
+      /* the glow off the top-right, behind the product panel */
       radial-gradient(
-        70% 55% at 78% 0%,
-        rgb(155 196 122 / 0.09) 0%,
-        transparent 70%
+        58% 62% at 84% -6%,
+        rgb(var(--wash-tint) / var(--wash-glow)) 0%,
+        transparent 66%
       ),
       radial-gradient(
-        90% 70% at 12% 4%,
-        rgb(155 196 122 / 0.05) 0%,
-        transparent 60%
+        74% 60% at 6% 0%,
+        rgb(var(--wash-tint) / var(--wash-corner)) 0%,
+        transparent 58%
       );
+  }
+
+  [data-theme="light"] .hero-wash {
+    --wash-tint: 69 111 42;
+    --wash-sweep: 0.06;
+    --wash-glow: 0.045;
+    --wash-corner: 0.035;
   }
 }
 

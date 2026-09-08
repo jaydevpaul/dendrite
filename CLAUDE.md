@@ -68,13 +68,14 @@ success and failure paths** · **the streaming route (`POST
 /conversations/{id}/messages/{message_id}/generate`), the four SSE events
 (`app/api/sse.py`), and `MessageOut.pending`** · 337 backend tests ·
 frontend slices 1, 2 and 3
-(landing, signup/login, route guards, theme toggle, conversation create +
-rename) · **frontend slice 3 — linear chat: the persistent conversation
-sidebar, the thread, the composer, SSE streaming via `fetch` +
-`ReadableStream`, and retry on an unanswered or unfinished reply
-(`frontend/src/features/messages/`, `components/conversation-sidebar.tsx`, the
-rewritten `app-shell.tsx` and both conversation routes)** — all verified end to
-end through the Vite proxy.
+(landing, signup/login, route guards, theme toggle) · **frontend slice 3 —
+linear chat: the persistent conversation sidebar, the thread, the composer, SSE
+streaming via `fetch` + `ReadableStream`, retry on an unanswered or unfinished
+reply, `StartPane` for an empty conversation, and a title derived from the
+first message (`frontend/src/features/messages/`,
+`components/conversation-sidebar.tsx`, the rewritten `app-shell.tsx`,
+`routes/new-conversation.tsx` and `routes/conversation.tsx`)** — all verified
+end to end through the Vite proxy.
 
 **Not built:** summarization (the write side — nothing populates
 `message_summary` yet), the embedding write side (nothing populates
@@ -95,7 +96,7 @@ lives in a **right-hand panel behind a switch**, because the left sidebar holds
 the conversation list. The palette gained one token, `scrim`, recorded as a
 dated amendment in `frontend_design.md` §5.
 
-**The tree is clean, committed through `16c2dd5`.** Three commits closed out
+**The tree is clean, committed through `HEAD`.** Three commits closed out
 that work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
 3, and `555be6d` for the write-ups. 337 tests passing on a clean tree.
 
@@ -291,6 +292,44 @@ there silently re-breaks the connection.
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
   `tone="panel"` variant, or it breaks in light mode.
+- **The dark ground is `#1A1A1A` and its four greys were *solved*, not
+  picked.** `surface`, `raised` and `line` reproduce the relationships the
+  palette was designed around (1.094x, 1.264x, 1.378x above the ground) to
+  three decimals, and `#1A1A1A` is close to the floor — below about `#171717`
+  no lighter grey lands on the 1.095x `surface` relationship at all, so a
+  deeper ground means redesigning the ramp, not nudging it. Changing any of
+  the four means re-measuring every token against **all three surfaces**, not
+  just the ground: `dim` on `raised` shipped at 4.43:1 against a 4.5:1 floor
+  for weeks because the original pass only ever compared against the ground.
+  `accent-ink`, the brand panel's two dark stops and the favicon tile all
+  hard-code the ground and have to move with it.
+- **Three faces, and the serif is for what the model writes.** Hanken Grotesk
+  for all interface text, Source Serif 4 for model replies and hero headlines,
+  IBM Plex Mono for token counts, model names, ids and strategy labels. The
+  reader's own messages stay in the sans — the serif/sans split is what
+  separates what was written for you from what you wrote, so do not "tidy" the
+  user bubble into the serif. These are stand-ins for Claude's own Copernicus
+  and Styrene, which are licensed and cannot be bundled; if they are ever
+  licensed, only the two `--font-*` variables in `index.css` change.
+- **The app has one gradient language: directional and warm.** `.brand-panel`
+  and `.hero-wash` are both sweeps, and `.hero-wash` carries every entry
+  surface — the landing hero, `/app`, and an empty conversation. A centred
+  radial bloom was built for the empty conversation and deleted the same day:
+  it did not fit beside two directional gradients, and no amount of tuning was
+  going to change that. Also worth keeping from it: **a two-stop radial bands
+  on a dark ground**, and where two of them cross the banding shows as a
+  mottled corner, so any radial here needs an eased four-stop falloff and a
+  single centre. And **a colour alone over near-black is paint, not light** —
+  9% moss over `#1A1A1A` lands on `#272B24`, army green; light desaturates
+  toward the ink at its core.
+- **`dim` may not sit on a gradient — not the brand panel, not `.hero-wash`.**
+  It measures 4.20:1 on the panel's lightest stop and 3.67:1 / 3.93:1 on the
+  wash's strongest, against a 4.5:1 floor. Use `muted` or stronger on either
+  surface. This is why the landing hero's stats row and the app's start surface
+  read `muted` where the rest of the app reads `dim`, and it is not an
+  inconsistency to tidy up. `muted` itself only clears the wash by 0.12 and
+  0.20 in the two themes, so raising `--wash-sweep` or `--wash-glow` means
+  re-measuring every token on that surface, not eyeballing it.
 
 ## Companion docs
 
@@ -341,7 +380,7 @@ holding the tree and the graph over one selection state, its open state
 remembered per user and an overlay below `lg`** (§8.18). The left sidebar is
 the conversation list and stays that way.
 
-**Frontend slice 4 — span branching — is now unblocked and is the alternative
+**Frontend slice 4 — span branching — is next, and is the alternative
 to C9.** Slice 3 shipped, so linear chat is the main surface and the sidebar
 holds the list; the edge and anchor routes slice 4 needs have been done since
 the message layer. Two things slice 3 left on the table for it: there is still
@@ -361,45 +400,32 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-07 (second session)**: **Frontend slice 3 built — linear chat, and
-  the conversation list became a persistent sidebar.** No backend file changed;
-  the suite stayed at **337 passing**. New: `frontend/src/features/messages/`
-  (`api.ts`, `queries.ts`, `stream.ts`, `thread.ts`, `use-chat.ts`,
-  `message-turn.tsx`, `composer.tsx`), `components/conversation-sidebar.tsx`,
-  `components/ui/textarea.tsx`, `postStream()` in `lib/api.ts`; rewritten:
-  `components/app-shell.tsx`, `routes/conversation.tsx` (the thread) and
-  `routes/conversations.tsx` (`/app` is now "start a conversation", since the
-  list moved into the shell). No `vite.config.ts` change — all three routes
-  nest under `/conversations`, which the proxy already forwards.
-  **Two shape decisions, both asked before building.** (1) **The linear path is
-  continuation edges only, newest child at each step** — now a standing gotcha
-  above, because both halves are load-bearing and neither fails loudly. (2)
-  **An unanswered question or an unfinished reply gets an explicit button, and
-  nothing generates on mount** — reopening a thread whose generation keeps
-  failing would otherwise call the model every time, which with a real key is
-  real spend.
-  **The stream:** `fetch` + `ReadableStream` because the reply comes from a
-  `POST` and `EventSource` is GET-only; decode with `stream: true`, split on
-  the blank line, normalise CRLF, `JSON.parse` each `data:`, ignore unknown
-  event names, cancel the body in a `finally`. `postStream` checking
-  `response.ok` is meaningful because every status-code failure lands before
-  the first byte. **On `done` the graph is refetched *before* the live text is
-  dropped** — the assistant row is blank in storage until the completion write,
-  so clearing first would flash an unfinished reply. The route is **keyed on
-  the conversation id**, or a reply still streaming follows the user into the
-  next conversation.
-  Run metadata (arm, why, model, the provider's token counts, degradations in
-  `warn`) sits under each reply and is **per-session by construction** —
-  nothing reads `Generation` rows back yet.
-  **Verified live through the proxy on :5173, fifteen steps**, including
-  regenerating the same question and watching the walk pick the new sibling
-  while reporting "1 earlier reply" on the question. The unfinished-reply state
-  needed a blank row inserted straight into the dev database, because the fake
-  finishes faster than a client can abandon it — also promoted to a gotcha.
-  `npm run build` clean, `conversation` its own 17.4 kB chunk.
-  **Flagged, not decided:** no markdown renderer (it has to cooperate with the
-  anchor's character offsets, so it waits for slice 4), no frontend test runner
-  (`thread.ts` is the first pure load-bearing frontend logic and the natural
-  first Vitest target), no strategy picker.
-  **Next: C9** (needs a key), or **frontend slice 4 — span branching**, which
-  is now unblocked.
+- **2026-09-08**: **Slice 3 reworked against Claude, ChatGPT and Gemini as
+  references.** No backend change; 337 still passing. Full detail in
+  `docs/PROGRESS.md`, durable rules already promoted into **Standing gotchas**.
+  **The dark ground deepened to `#1A1A1A` — a LOCKED change**, superseded in
+  writing in `frontend_design.md` §5. The four greys were *solved* to preserve
+  the palette's designed relationships to three decimals, and it **repaired a
+  live failure**: `dim` on `raised` was shipping at 4.43:1 against a 4.5:1
+  floor, missed because the original pass only measured against the ground.
+  **`.hero-wash` rebuilt** (0.09 alpha measured as designed and read as
+  nothing) and now carries all three entry surfaces. A bespoke centred glow was
+  built for the empty conversation and **deleted the same day** — it was a
+  second gradient language beside two directional ones.
+  **The chat page was stripped**: header band, role labels, the composer's
+  raised band, the `Enter sends` hint everywhere but the empty state. The
+  conversation's facts moved to one line under the prompt and **the id is
+  gone**.
+  **`/app`'s title form is gone** — it is the same `StartPane` as an empty
+  conversation, nothing is created until something is sent, and titles are
+  derived from the first message in the create call.
+  **The sidebar collapses and persists**; rows went two lines to one.
+  **A strategy switch in the prompt box**, driving the `PATCH` route that has
+  existed since the conversation layer — *not* slice 6's picker.
+  **`MenuSelect` replaced a native `select`**, because a `select`'s dropdown is
+  drawn by the OS and cannot be themed. Only shadow in the app.
+  **Fonts: Hanken Grotesk + Source Serif 4 + IBM Plex Mono.** Claude's own
+  Copernicus and Styrene are licensed and cannot be bundled. The serif is now
+  used for body copy — model replies only — reversing §4's old rule.
+  **Next: frontend slice 4 — span branching**, unblocked since the message
+  layer.

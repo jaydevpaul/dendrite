@@ -8,7 +8,7 @@ import { RequireAuth, RequireGuest } from "@/components/route-guards";
 const LandingPage = lazy(() => import("./routes/landing"));
 const LoginPage = lazy(() => import("./routes/login"));
 const SignupPage = lazy(() => import("./routes/signup"));
-const ConversationsPage = lazy(() => import("./routes/conversations"));
+const NewConversationPage = lazy(() => import("./routes/new-conversation"));
 const ConversationPage = lazy(() => import("./routes/conversation"));
 
 export default function App() {
@@ -26,7 +26,7 @@ export default function App() {
 
         <Route element={<RequireAuth />}>
           <Route element={<AppShell />}>
-            <Route path="/app" element={<ConversationsPage />} />
+            <Route path="/app" element={<NewConversationPage />} />
             <Route path="/app/c/:conversationId" element={<ConversationPage />} />
           </Route>
         </Route>

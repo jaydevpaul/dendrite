@@ -69,3 +69,38 @@ export function getConversation(id: string) {
 export function updateConversation(id: string, body: ConversationUpdate) {
   return request<Conversation>(`/conversations/${id}`, { method: "PATCH", body });
 }
+
+/**
+ * The server default, applied when POST /conversations carries no title. It is
+ * the only value a derived title is allowed to replace -- a name the user
+ * typed, or one they renamed to, is never overwritten.
+ */
+export const DEFAULT_TITLE = "Untitled";
+
+/** Roughly a sidebar row's worth of characters before it truncates anyway. */
+const TITLE_FROM_MESSAGE_LENGTH = 48;
+
+/**
+ * Name a conversation after its first message.
+ *
+ * Cut at a word boundary rather than mid-word, and collapse whitespace first
+ * so a pasted multi-line question does not become a title with newlines in it.
+ * The result always has at least one character, which the API requires, since
+ * the composer has already refused empty text.
+ *
+ * This is truncation, not summarisation. The tools that read like this ask a
+ * model for a short title, and doing that here would mean either a second
+ * provider call per conversation or a title written by the fake client -- so
+ * every conversation would be called "A fake reply in two parts." Truncation
+ * costs nothing and is honest about being the first thing you said.
+ */
+export function titleFromMessage(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= TITLE_FROM_MESSAGE_LENGTH) return oneLine;
+
+  const cut = oneLine.slice(0, TITLE_FROM_MESSAGE_LENGTH);
+  const lastSpace = cut.lastIndexOf(" ");
+  // Only honour the word boundary if it leaves a usable title behind; one very
+  // long first word should still be cut rather than returned whole.
+  return (lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd();
+}

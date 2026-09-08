@@ -121,17 +121,17 @@ export default function LandingPage() {
               )}
             </div>
 
-            <dl className="flex flex-wrap gap-x-8 gap-y-3 border-t border-line pt-5 font-mono text-[11.5px] text-dim tabular-nums">
+            <dl className="flex flex-wrap gap-x-8 gap-y-3 border-t border-line pt-5 font-mono text-[11.5px] text-muted tabular-nums">
               <div>
-                <dt className="text-muted">Storage</dt>
+                <dt className="text-ink">Storage</dt>
                 <dd>Postgres + pgvector, one system</dd>
               </div>
               <div>
-                <dt className="text-muted">Metric</dt>
+                <dt className="text-ink">Metric</dt>
                 <dd>answer quality per token</dd>
               </div>
               <div>
-                <dt className="text-muted">Budget</dt>
+                <dt className="text-ink">Budget</dt>
                 <dd>1–2s composition</dd>
               </div>
             </dl>
