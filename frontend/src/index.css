@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* KaTeX ships its own stylesheet and its own fonts; the model reaches for
+   LaTeX often enough that formulae have to render rather than sit there as
+   backslashes. */
+@import "katex/dist/katex.min.css";
 
 /* ---------------------------------------------------------------------------
    Dendrite design tokens.
@@ -224,5 +228,241 @@
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Rendered replies.
+
+   Written as CSS on one class rather than as Tailwind classes on twenty
+   component overrides, because what is being styled is markup this app never
+   writes by hand - it comes out of the markdown renderer. The tokens are the
+   same ones the rest of the app uses; nothing here introduces a colour.
+
+   Syntax highlighting borrows `warn` and `danger` rather than gaining palette
+   entries of its own, and deliberately never uses the accent: the accent marks
+   the current branch and the primary action, and a code block full of green
+   keywords would spend that meaning on punctuation.
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  .reply-prose > *:first-child {
+    margin-top: 0;
+  }
+  .reply-prose > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .reply-prose p {
+    margin: 0.85em 0;
+  }
+
+  .reply-prose h1,
+  .reply-prose h2,
+  .reply-prose h3,
+  .reply-prose h4 {
+    margin: 1.5em 0 0.5em;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  .reply-prose h1 {
+    font-size: 1.3em;
+  }
+  .reply-prose h2 {
+    font-size: 1.15em;
+  }
+  .reply-prose h3 {
+    font-size: 1.03em;
+  }
+  .reply-prose h4 {
+    font-size: 1em;
+    color: var(--color-muted);
+  }
+
+  .reply-prose strong {
+    font-weight: 600;
+  }
+
+  .reply-prose ul,
+  .reply-prose ol {
+    margin: 0.8em 0;
+    padding-left: 1.4em;
+  }
+  .reply-prose ul {
+    list-style: disc;
+  }
+  .reply-prose ol {
+    list-style: decimal;
+  }
+  .reply-prose li {
+    margin: 0.3em 0;
+  }
+  /* A nested list is a continuation of its item, not a new block. */
+  .reply-prose li > ul,
+  .reply-prose li > ol {
+    margin: 0.3em 0;
+  }
+  .reply-prose li > p {
+    margin: 0.3em 0;
+  }
+  .reply-prose li::marker {
+    color: var(--color-dim);
+  }
+  /* GFM task lists. The box is the model's, so it is not interactive. */
+  .reply-prose li input[type="checkbox"] {
+    margin-right: 0.45em;
+    accent-color: var(--color-muted);
+  }
+  .reply-prose li:has(> input[type="checkbox"]) {
+    list-style: none;
+    margin-left: -1.4em;
+  }
+
+  .reply-prose blockquote {
+    margin: 0.9em 0;
+    padding-left: 0.9em;
+    border-left: 2px solid var(--color-line-strong);
+    color: var(--color-muted);
+  }
+
+  .reply-prose hr {
+    margin: 1.4em 0;
+    border: 0;
+    border-top: 1px solid var(--color-line);
+  }
+
+  /* Not the accent: a link inside a reply is not the primary action on the
+     screen it appears in. */
+  .reply-prose a {
+    text-decoration: underline;
+    text-decoration-color: var(--color-line-strong);
+    text-underline-offset: 2px;
+  }
+  .reply-prose a:hover {
+    text-decoration-color: currentColor;
+  }
+
+  /* Inline code, distinct from a fenced block: no chrome, just a tint. */
+  .reply-prose :not(pre) > code {
+    padding: 0.12em 0.34em;
+    border-radius: 4px;
+    background-color: var(--color-raised);
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+  }
+
+  .reply-prose .reply-table-scroll {
+    /* A wide table scrolls in its own box; the thread's width is fixed by the
+       composer under it. */
+    margin: 1em 0;
+    overflow-x: auto;
+  }
+  .reply-prose table {
+    border-collapse: collapse;
+    width: max-content;
+    min-width: 100%;
+    font-family: var(--font-sans);
+    font-size: 0.84em;
+  }
+  .reply-prose th,
+  .reply-prose td {
+    padding: 0.45em 0.7em;
+    border: 1px solid var(--color-line);
+    text-align: left;
+    vertical-align: top;
+  }
+  .reply-prose th {
+    background-color: var(--color-raised);
+    font-weight: 600;
+  }
+
+  /* Display math scrolls rather than widening the thread, the same rule as a
+     table. */
+  .reply-prose .katex-display {
+    margin: 1em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.2em 0;
+  }
+
+  /* A branch anchored on a formula or a whole code block puts the mark round
+     the block itself, and a mark is inline by default - which would drop a
+     block inside an inline box and take its width with it. */
+  .reply-prose mark:has(.katex-display),
+  .reply-prose mark:has(> .reply-code) {
+    display: block;
+  }
+
+  /* --- fenced code ---------------------------------------------------- */
+
+  .reply-code {
+    margin: 1em 0;
+    border: 1px solid var(--color-line);
+    border-radius: 10px;
+    background-color: var(--color-surface);
+    overflow: hidden;
+  }
+  .reply-code-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.3rem 0.4rem 0.3rem 0.75rem;
+    border-bottom: 1px solid var(--color-line);
+    background-color: var(--color-raised);
+  }
+  .reply-code pre {
+    margin: 0;
+    padding: 0.85em 1em;
+    overflow-x: auto;
+  }
+  .reply-code pre code {
+    font-family: var(--font-mono);
+    font-size: 0.8em;
+    line-height: 1.65;
+    color: var(--color-ink);
+  }
+
+  /* highlight.js token classes, mapped onto tokens that already exist. */
+  .hljs-comment,
+  .hljs-quote {
+    color: var(--color-dim);
+    font-style: italic;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-section,
+  .hljs-doctag,
+  .hljs-type,
+  .hljs-name,
+  .hljs-strong {
+    color: var(--color-danger);
+  }
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-addition,
+  .hljs-attribute,
+  .hljs-attr,
+  .hljs-meta .hljs-string {
+    color: var(--color-warn);
+  }
+  .hljs-number,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-link,
+  .hljs-meta,
+  .hljs-selector-id,
+  .hljs-title,
+  .hljs-built_in,
+  .hljs-class .hljs-title {
+    color: var(--color-muted);
+  }
+  .hljs-emphasis {
+    font-style: italic;
+  }
+  .hljs-deletion {
+    color: var(--color-danger);
+    text-decoration: line-through;
   }
 }

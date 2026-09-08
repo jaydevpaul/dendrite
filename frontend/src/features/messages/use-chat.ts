@@ -9,6 +9,7 @@ import {
 } from "@/features/conversations/api";
 import { conversationKeys } from "@/features/conversations/queries";
 import { createMessage, generatePath, type AnyStrategy, type StrategySource } from "./api";
+import type { AnchorPayload } from "./anchor";
 import { appendCreatedMessage, messageKeys } from "./queries";
 import { readGeneration, type StartData } from "./stream";
 
@@ -47,6 +48,23 @@ export interface RunRecord {
   inputTokens: number | null;
   outputTokens: number | null;
   degradations: string[];
+}
+
+/** The two things a branch needs that an ordinary reply does not. */
+export interface SendOptions {
+  /** Makes the new link an anchored one. Omitted for a continuation. */
+  anchor?: AnchorPayload;
+  /**
+   * Stored on the new link, and inherited by everything below it. Omitted
+   * when the branch is happy with what the link resolves to on its own.
+   */
+  strategyOverride?: AnyStrategy;
+  /**
+   * Called with the new message's id after it is written and before the reply
+   * is asked for, which is the only moment a caller can move the view to it
+   * without abandoning the stream.
+   */
+  onCreated?: (messageId: string) => void;
 }
 
 export function useChat(conversationId: string) {
@@ -191,7 +209,7 @@ export function useChat(conversationId: string) {
   );
 
   const send = useCallback(
-    async (text: string, parentMessageId: string | null) => {
+    async (text: string, parentMessageId: string | null, options?: SendOptions) => {
       setError(null);
       setSending(true);
       try {
@@ -199,9 +217,22 @@ export function useChat(conversationId: string) {
           role: "user",
           content: text,
           parent_message_id: parentMessageId,
+          // Present only for a branch. All three fields together make the
+          // link an anchored one, which is what makes the reply compose from
+          // the highlighted span instead of the conversation's default arm --
+          // so an override is sent only when one was actually chosen.
+          ...options?.anchor,
+          ...(options?.strategyOverride === undefined
+            ? {}
+            : { strategy_override: options.strategyOverride }),
         });
 
         appendCreatedMessage(queryClient, conversationId, created);
+
+        // Before generating, not after: a branch has to be on screen while
+        // its first reply streams into it, and the reply is written to the
+        // message this hands back.
+        options?.onCreated?.(created.message.id);
 
         // The root message is the one that names the conversation. Awaited
         // before the list is invalidated so the sidebar refetches once, with

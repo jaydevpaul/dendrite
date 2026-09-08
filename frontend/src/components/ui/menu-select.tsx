@@ -23,9 +23,11 @@ import { cn } from "@/lib/utils";
  * options are not themselves focusable, and it means nothing has to hand focus
  * back on close.
  *
- * The list opens **upward**, because the only place this is used is the prompt
- * box at the bottom of the viewport, where a list opening downward is off the
- * bottom of the screen.
+ * The list opens **upward by default**, because the first place this was used
+ * is the prompt box at the bottom of the viewport, where a list opening
+ * downward is off the bottom of the screen. The branch composer sits in the
+ * middle of the thread and wants the other direction: upward there covers the
+ * reply above it, which is the text the branch is being taken from.
  *
  * Set in the interface sans, not the mono, even when the values are
  * identifiers. Mono marks a value being *reported* -- a token count, a model
@@ -41,6 +43,7 @@ export function MenuSelect<T extends string>({
   disabled,
   className,
   title,
+  direction = "up",
 }: {
   value: T;
   options: readonly T[];
@@ -50,6 +53,8 @@ export function MenuSelect<T extends string>({
   disabled?: boolean;
   className?: string;
   title?: string;
+  /** Which way the list opens. See the note above on why "up" is the default. */
+  direction?: "up" | "down";
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(() => Math.max(options.indexOf(value), 0));
@@ -154,7 +159,10 @@ export function MenuSelect<T extends string>({
           id={listId}
           role="listbox"
           aria-label={label}
-          className="absolute bottom-full left-0 z-20 mb-1 min-w-full rounded-lg border border-line-strong bg-surface p-1 shadow-[0_10px_30px_rgb(0_0_0/0.38)]"
+          className={cn(
+            "absolute left-0 z-20 min-w-full rounded-lg border border-line-strong bg-surface p-1 shadow-[0_10px_30px_rgb(0_0_0/0.38)]",
+            direction === "up" ? "bottom-full mb-1" : "top-full mt-1",
+          )}
         >
           {options.map((option, index) => {
             const selected = option === value;
