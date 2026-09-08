@@ -1614,6 +1614,130 @@ Two narrowings that follow from it:
 
 ---
 
+### 8.19 Deletion, rendered replies, and the concrete client as built (decided 2026-09-08)
+
+Three things settled while finishing Layer C and frontend slice 4. The first is
+a genuinely new decision on a question this record was silent about; the second
+supersedes a rule written in `frontend_design.md` and repeated here in 8.18's
+neighbourhood; the third records what the one real client turned out to need.
+None touches a column, an index, section 5's five strategies or section 6's
+topology.
+
+**A conversation can be deleted, and the delete really deletes. (New; the
+record was silent.)** Section 6 locks that *regeneration* never deletes, and
+that rule is untouched: it is about a message inside a conversation being
+replaced, not about a reader's own conversations.
+
+A soft delete — a `deleted_at` column, filtered everywhere — was considered
+first and rejected. Its only real argument was keeping generations for section
+7, and section 7 does not read a reader's conversations: 8.18 already fixed
+that the harness runs on its own fixture conversations, precisely because five
+arms against one message would wreck a human's linear view. So a flag would
+mean holding data somebody asked to be rid of, in exchange for nothing.
+
+**The cascade is in the database, not in the service.** `DELETE FROM
+conversation` takes the conversation's messages — every branch included, since
+a branch is just a message in the same conversation — and with them their
+edges, generations, summaries and embeddings. Six ordered deletes in Python
+would be six chances to leave orphans, and a child table added later inherits
+the behaviour by declaring its foreign key rather than by somebody remembering
+to extend a list.
+
+`conversation.root_message_id` is the one exception: **SET NULL, not CASCADE.**
+That column points *down* into the conversation's own first message, so
+cascading from it would let deleting a single message take the conversation and
+every other message with it.
+
+*The migration is hand-written on purpose.* Alembic's autogenerate does not
+compare a foreign key's `ON DELETE` action at all — it reports "no changes" for
+the whole migration. This is a fourth entry in the standing list of things
+autogenerate gets wrong about this schema.
+
+*Route shape:* `DELETE /conversations/{id}` → 204, behind the same
+`OwnedConversation` dependency as every other conversation route, so another
+user's id 404s before the handler body runs. 404 rather than 403, for the
+reason 8.11 gives.
+
+**Model replies are rendered as markdown, and anchors survive it by carrying
+source positions into the DOM. (Supersedes "there is no markdown renderer, and
+that is load-bearing".)**
+
+The old rule was real and worth keeping as long as it lasted: a reply rendered
+as plain text under `white-space: pre-wrap` puts exactly the stored characters
+in the DOM, so a `Range` over the reply measures straight into the offsets an
+anchor is written with. Rendering markdown breaks that equality — `**bold**` on
+disk is `bold` on screen — and a highlight measured against the rendered text
+would write anchors a few characters out, worse the further down the reply you
+go.
+
+It stopped being sustainable for one reason: the model writes markdown whether
+or not anyone renders it. Leaving it raw was not neutrality, it was showing the
+reader pipe characters where a table was meant, `**` around every emphasis, and
+LaTeX source where a formula belonged.
+
+So the equality is replaced by a mapping, and the mapping is not reconstructed
+by guesswork — it is what the parser already knew, written into the markup:
+
+- **Every run of text that came from the source verbatim is stamped with where
+  it started in the stored message.** A selection is measured *within* one
+  stamped run and added to that run's stamp, never across the whole reply —
+  because the characters between two runs (a fence's backticks, the blank line
+  between paragraphs) are in the stored string and not in the DOM at all.
+- **Every stamp is verified against the source before it is emitted.** A node
+  whose rendered text is not literally the source slice it claims — an escaped
+  asterisk, an entity, a KaTeX formula that is a whole DOM tree rather than a
+  string — is stamped **atomic**: it still knows its source range, but a
+  selection touching it takes that range whole rather than measuring inside it.
+  A coarser anchor is a fine trade; a wrong one is not on the table, because
+  wrong offsets are a 422 in the good case and a mark over the wrong words in
+  the bad one.
+- **A mark can go round a whole node, not only a run of text.** Leaving that
+  out was a live failure: a branch off a formula resolved, therefore counted as
+  marked, therefore was also left off the list of branches shown under the
+  message — it existed and was reachable from nowhere.
+- **Which mode applies is decided by the markup, not by a flag.** Stamped runs
+  present means measure per run; absent means measure flat. The reader's own
+  messages stay plain text and take the flat path, so a turn cannot be rendered
+  one way and measured the other.
+
+*Rejected: rendering markdown and dropping anchor precision until later.* That
+parks the thesis of the project to fix its cosmetics.
+
+*Rejected: normalising the text before parsing in a way that changes its
+length.* `\[` and `\(` are rewritten to `$$` so the formulae render, and that
+is only allowed because the swap is **length-preserving** — two characters in,
+two out — so the parser's positions are still positions in the stored string.
+The property is asserted at runtime, and the original text is returned
+unchanged if it ever fails.
+
+**The branch composer floats at the span.** It was built inline under the reply
+first, which is wrong for a plain reason: a reply can be pages long, so the
+field opened far below the words it was about and the reader had to scroll away
+from them in order to ask about them. The referent staying on screen is the
+whole point of an anchor. Unlike the offer that precedes it, the composer is
+*not* dismissed on scroll — by then there is typing in it to lose.
+
+**C9 as built — two things the wire format required.**
+
+- **`stream_options={"include_usage": True}` or there is no usage at all.**
+  D12 says token counts come from the provider's own `usage`; on chat
+  completions that number only arrives if the request asks for it, and without
+  the flag every `Generation` row lands with null counts and section 7 has
+  nothing to divide quality by. The usage frame also carries an **empty
+  `choices`**, so a loop that indexes the first choice on every frame turns
+  every successful generation into an `IndexError` on its last one.
+- **One client per process, not per request.** `get_llm()` caches the concrete
+  client; building one per request would open a new connection pool per
+  message. The fake stays per-request, because its recorded calls are the
+  assertion surface for every route test.
+
+Model ids in config were verified against the live API rather than assumed, and
+the live tests are gated on their own environment variable rather than on the
+key being present — so adding a key to `.env` does not quietly make every test
+run cost money.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:

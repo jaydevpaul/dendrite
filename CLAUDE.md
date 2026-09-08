@@ -44,7 +44,7 @@ populated → branch, null → continuation; regeneration never deletes.
   section only when he asks where something is written down. (Applies to code
   written from 2026-09-05 on; `tests/test_llm_fake.py` predates it.)
 
-## Current state (2026-09-07)
+## Current state (2026-09-08)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
@@ -66,7 +66,10 @@ composition for four of the five strategies (`app/context/base.py`,
 the buffered stream, the completion write, and the `Generation` row on both the
 success and failure paths** · **the streaming route (`POST
 /conversations/{id}/messages/{message_id}/generate`), the four SSE events
-(`app/api/sse.py`), and `MessageOut.pending`** · 337 backend tests ·
+(`app/api/sse.py`), and `MessageOut.pending`** · **the one real OpenAI client
+(`app/llm/openai_client.py`), verified against the live API** · **conversation
+delete (`DELETE /conversations/{id}`, the cascade migration
+`b1c4d9e77a30`)** · 354 backend tests ·
 frontend slices 1, 2 and 3
 (landing, signup/login, route guards, theme toggle) · **frontend slice 3 —
 linear chat: the persistent conversation sidebar, the thread, the composer, SSE
@@ -75,18 +78,31 @@ reply, `StartPane` for an empty conversation, and a title derived from the
 first message (`frontend/src/features/messages/`,
 `components/conversation-sidebar.tsx`, the rewritten `app-shell.tsx`,
 `routes/new-conversation.tsx` and `routes/conversation.tsx`)** — all verified
-end to end through the Vite proxy.
+end to end through the Vite proxy · **frontend slice 4 — span branching: the
+selection-to-offsets layer (`selection.ts`, `anchor.ts`), the floating offer
+and composer (`span-branch.tsx`), marks with a popover of the branches that
+grew from them, and `?from=` re-rooting the thread** · **markdown-rendered
+replies with the source-offset mapping that keeps anchors exact
+(`reply-markdown.tsx`, `source-spans.ts`, `math.ts`)** · **the sidebar delete
+with its confirm dialog (`components/ui/confirm-dialog.tsx`)** · 68 frontend
+tests in Vitest + jsdom.
 
 **Not built:** summarization (the write side — nothing populates
 `message_summary` yet), the embedding write side (nothing populates
-`message_embedding` yet either), the one real OpenAI client, eval framework,
-the graph navigator, span branching in the UI (frontend slice 4 — the backend
-side of it is done), a markdown renderer, a strategy picker, any frontend test
-runner.
+`message_embedding` yet either), eval framework, the graph navigator (slice 5),
+slice 6's strategy picker. **The two write sides are the important gap:**
+`HierarchicalDecay` and retrieval both read tables nothing fills, so they
+silently degrade to plainer strategies and §7's whole comparison is
+unmeasurable until they exist.
 
-**All twelve Layer C shape decisions are settled and written up as §8.15
-(D1–D12); the build decisions taken since are in §8.16 (C1–C2) and §8.17
-(C6–C8).** Do not re-litigate them. §8.15's D8, D9 and D11 each carry a dated
+**No React component is rendered by any test.** Vitest runs the string and DOM
+maths — offsets, the source-span sweep, the thread walk — and there is no
+testing library, so anything that only shows up when a component renders is
+verified by reading and by using the app.
+
+**Layer C is finished.** All twelve shape decisions are written up as §8.15
+(D1–D12); the build decisions are in §8.16 (C1–C2), §8.17 (C6–C8) and §8.19
+(C9 as built). Do not re-litigate them. §8.15's D8, D9 and D11 each carry a dated
 correction or narrowing — read the parentheticals, not just the headline.
 
 **§8.18 settles two frontend shape questions** that slice 3 forced: which path
@@ -96,9 +112,18 @@ lives in a **right-hand panel behind a switch**, because the left sidebar holds
 the conversation list. The palette gained one token, `scrim`, recorded as a
 dated amendment in `frontend_design.md` §5.
 
-**The tree is clean, committed through `925312d`.** Four commits closed out
-that work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
-3, `555be6d` for the write-ups, and `925312d` for slice 3's rework against the reference apps. 337 tests passing on a clean tree.
+**§8.19 settles three more things** (2026-09-08): that a conversation can be
+deleted and that the delete really deletes, cascading in the database rather
+than in the service; that **model replies are rendered markdown**, which
+supersedes the old "no markdown renderer, and that is load-bearing" rule and
+replaces the DOM-equals-storage equality with a verified source-offset
+mapping; and the two wire-format facts C9 turned out to need.
+
+**The tree is clean, committed through `3ffe131`.** Three commits closed out
+that work: `07085df` for C9, `ebc145b` for conversation delete, and `3ffe131`
+for slice 4 together with the renderer — one commit, because separating them
+would have meant splitting hunks in `selection.ts` and `message-turn.tsx`.
+354 backend and 68 frontend tests passing on a clean tree.
 
 ### Running it
 
@@ -331,6 +356,53 @@ there silently re-breaks the connection.
   0.20 in the two themes, so raising `--wash-sweep` or `--wash-glow` means
   re-measuring every token on that surface, not eyeballing it.
 
+- **An `.env` change needs the server killed and restarted.** `Settings()` is
+  constructed at import, and `--reload` watches `.py` files only — so flipping
+  `DENDRITE_LLM_CLIENT` and resending gets you the fake's reply again with
+  nothing on screen saying why. A fresh `python -c` printing the setting proves
+  the file, never the running process.
+- **Bash heredocs on this machine eat one level of backslash escaping.** A test
+  file written with `cat <<'EOF'` came out with real newlines where `\n` was
+  meant and `\[` where `\\[` was, which esbuild reported as an unterminated
+  string literal three lines away from the cause. Anything containing
+  backslashes or escape sequences goes through the editor tools instead.
+- **Alembic autogenerate does not compare a foreign key's `ON DELETE` action at
+  all** — it reports "no changes" for a migration that changes every one of
+  them. That is the fourth thing it gets wrong about this schema, alongside the
+  missing `pgvector` import, the absent `CREATE EXTENSION vector`, and the
+  silently dropped `use_alter` circular FK.
+- **Chat completions report no `usage` unless the request asks for it.**
+  `stream_options={"include_usage": True}`, or every `Generation` row lands
+  with null token counts and §7 has nothing to divide quality by. The usage
+  frame also arrives with an **empty `choices`**, so a loop that reads
+  `chunk.choices[0]` unconditionally raises `IndexError` on the last frame of a
+  perfectly good stream.
+- **The live LLM tests are gated on `DENDRITE_LIVE_LLM=1`, not on the key.**
+  Gating on the key would mean that putting one in `.env` silently bills every
+  `pytest` run. In PowerShell: `$env:DENDRITE_LIVE_LLM = "1"` on its own line —
+  bash's `VAR=x cmd` prefix is a parse error there.
+- **The source-offset layer's failure mode is silence.** Nothing throws, the
+  reply renders perfectly, and branching quietly stops being offered. Three
+  ways it happened: a mark that did not carry the stamp of the run it replaced
+  (`MarkedSpan` draws its own element, so it must copy `data-src-start`/`-end`
+  across); two selection boundaries with no stamped run around them, which fall
+  back in opposite directions, cross, and used to make `offsetsForRange` return
+  null; and a branch anchored on a formula, which resolved and therefore
+  counted as marked while nothing drew it, leaving the branch reachable from
+  nowhere. The load-bearing test is a sweep asserting every measurable run
+  contains exactly the source text it claims — not a list of cases.
+- **Any rewrite of a reply's text before parsing must preserve its length.**
+  `\[` → `$$` is two characters for two, which is the only reason the LaTeX
+  swap is allowed to run: the parser's positions have to stay positions in the
+  stored string. `math.ts` asserts it and returns the original if it fails.
+- **`focus()` scrolls the field into view.** The branch composer opens in the
+  middle of a thread, so it needs `focus({ preventScroll: true })` or the reply
+  the span was taken from slides off screen at the moment the reader is about
+  to write about it.
+- **A `<mark>` is inline, so a mark round a block collapses it.** A branch
+  anchored on a formula or a whole code block puts the mark round the node, and
+  `.reply-prose mark:has(...)` has to make that one `display: block`.
+
 ## Companion docs
 
 - `docs/Dendrite_Decision_Record.md` — authoritative spec; wins over everything.
@@ -339,58 +411,48 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Layer C — generation, sitting C9.** Every shape decision is settled in
-**§8.15 (D1–D12)**, with the build decisions in **§8.16** and **§8.17**; read
-those first and do not re-litigate them. Streaming is SSE via
-`StreamingResponse`, not websockets (§8.8).
+**The summarization and embedding write side.** Layer C is finished, frontend
+slice 4 has shipped, and this is now the gap that matters: nothing populates
+`message_summary` or `message_embedding`, so `HierarchicalDecay` and
+`HierarchicalDecayWithRetrieval` both read tables that are always empty. They
+degrade quietly to plainer strategies, which means §7 would compare five arms
+where two of them are not doing the thing they exist to test. **The project's
+own thesis is unmeasurable until this exists.**
 
-The nine sittings, in dependency order — each is one hand-typing session:
+What it needs, from §8.5 and §8.6: summarization is **async and lightweight** —
+written after a message lands, not on the read path — and composition must
+still work when a summary is missing, which it already does. The embedding side
+writes `vector(1536)` from `text-embedding-3-small` and is the same shape of
+job: one row per message, written off the request. Both now have a real client
+to call, so the only new decisions are *when* the work is queued and what
+happens to a message whose summary never lands.
 
-| # | Piece | Needs | State |
-|---|---|---|---|
-| C1 | `LLMClient` protocol, `FakeLLMClient`, LLM config keys | nothing | **done** |
-| C2 | Context types, strategy interface, `FullInheritance`, `ParentOnly`, `SpanOnly` | the B2 walk | **done** |
-| C3 | Decay function interface + `TieredDecay` + the summary reader | DB | **done** |
-| C4 | `HierarchicalDecay` | C3 | **done** |
-| C5 | Ancestor-scoped pgvector retrieval + `HierarchicalDecayWithRetrieval` | C4 | **done** |
-| C6 | `compose_context()` — resolve → walk → dispatch → degradations | C2–C5 | **done** |
-| C7 | Generation service — §8.14's write pattern, the `Generation` row, the failure path | C6 | **done** |
-| C8 | SSE route, the four events, `MessageOut.pending` | C7 | **done** |
-| **C9** | The one concrete OpenAI client, against the real API | last, on purpose | **next** |
+Read §8.5, §8.6 and §9's `message_summary` / `message_embedding` rows before
+starting, and note that `load_summaries()` and the retrieval query already
+exist and define what the writers have to produce.
 
-C9 is deliberately last: everything above it is testable against the fake with
-no key and no spend.
+The nine Layer C sittings, all done:
 
-**C9 concretely:** one class satisfying `LLMClient` against the real OpenAI
-API. `generate` streams and must finish with exactly one `Completed` carrying
-the provider's own `usage` — for chat completions that needs
-`stream_options={"include_usage": True}` in the request, or no usage arrives at
-all and every `Generation` row lands with null token counts. `embed` returns
-1536 floats from `text-embedding-3-small`. Model ids, `base_url` and the effort
-dial are already in config; set `DENDRITE_LLM_CLIENT=openai` and
-`DENDRITE_LLM_API_KEY` in `.env` to switch `get_llm()` over.
+| # | Piece | State |
+|---|---|---|
+| C1 | `LLMClient` protocol, `FakeLLMClient`, LLM config keys | **done** |
+| C2 | Context types, strategy interface, `FullInheritance`, `ParentOnly`, `SpanOnly` | **done** |
+| C3 | Decay function interface + `TieredDecay` + the summary reader | **done** |
+| C4 | `HierarchicalDecay` | **done** |
+| C5 | Ancestor-scoped pgvector retrieval + `HierarchicalDecayWithRetrieval` | **done** |
+| C6 | `compose_context()` — resolve → walk → dispatch → degradations | **done** |
+| C7 | Generation service — §8.14's write pattern, the `Generation` row, the failure path | **done** |
+| C8 | SSE route, the four events, `MessageOut.pending` | **done** |
+| C9 | The one concrete OpenAI client, against the real API | **done** |
 
-Everything above C9 is already tested against the fake, so the only new risk is
-the wire format. Two things to keep: thinking stays on and held constant across
-all five arms, and token counts come from the provider's `usage`, never a local
-tokenizer.
-
-**Slice 5's navigator has a home now: a right-hand panel behind a switch,
-holding the tree and the graph over one selection state, its open state
-remembered per user and an overlay below `lg`** (§8.18). The left sidebar is
-the conversation list and stays that way.
-
-**Frontend slice 4 — span branching — is next, and is the alternative
-to C9.** Slice 3 shipped, so linear chat is the main surface and the sidebar
-holds the list; the edge and anchor routes slice 4 needs have been done since
-the message layer. Two things slice 3 left on the table for it: there is still
-no markdown renderer, deliberately, because it is the piece that will have to
-cooperate with the anchor's character offsets; and the linear walk already
-counts anchored children per message without rendering them, which is the hook
-slice 4 renders into.
-
-Pick by whether a key is available — C9 is the only remaining piece that costs
-money to test.
+**After the write side:** slice 5's navigator — a right-hand panel behind a
+switch holding the tree and the graph over one selection state, its open state
+remembered per user and an overlay below `lg` (§8.18). The left sidebar is the
+conversation list and stays that way. Then slice 6's strategy picker, which
+shows the composed context and the token cost beside each arm — not the
+per-branch menu slice 4 already added. **The eval is last, and it is the only
+piece that costs real money**: ~$2.60 a run against a $20 budget, so it runs
+when there is something worth measuring.
 
 ## Progress log
 
@@ -400,32 +462,28 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-08**: **Slice 3 reworked against Claude, ChatGPT and Gemini as
-  references.** No backend change; 337 still passing. Full detail in
-  `docs/PROGRESS.md`, durable rules already promoted into **Standing gotchas**.
-  **The dark ground deepened to `#1A1A1A` — a LOCKED change**, superseded in
-  writing in `frontend_design.md` §5. The four greys were *solved* to preserve
-  the palette's designed relationships to three decimals, and it **repaired a
-  live failure**: `dim` on `raised` was shipping at 4.43:1 against a 4.5:1
-  floor, missed because the original pass only measured against the ground.
-  **`.hero-wash` rebuilt** (0.09 alpha measured as designed and read as
-  nothing) and now carries all three entry surfaces. A bespoke centred glow was
-  built for the empty conversation and **deleted the same day** — it was a
-  second gradient language beside two directional ones.
-  **The chat page was stripped**: header band, role labels, the composer's
-  raised band, the `Enter sends` hint everywhere but the empty state. The
-  conversation's facts moved to one line under the prompt and **the id is
-  gone**.
-  **`/app`'s title form is gone** — it is the same `StartPane` as an empty
-  conversation, nothing is created until something is sent, and titles are
-  derived from the first message in the create call.
-  **The sidebar collapses and persists**; rows went two lines to one.
-  **A strategy switch in the prompt box**, driving the `PATCH` route that has
-  existed since the conversation layer — *not* slice 6's picker.
-  **`MenuSelect` replaced a native `select`**, because a `select`'s dropdown is
-  drawn by the OS and cannot be themed. Only shadow in the app.
-  **Fonts: Hanken Grotesk + Source Serif 4 + IBM Plex Mono.** Claude's own
-  Copernicus and Styrene are licensed and cannot be bundled. The serif is now
-  used for body copy — model replies only — reversing §4's old rule.
-  **Next: frontend slice 4 — span branching**, unblocked since the message
-  layer.
+- **2026-09-08 (second session)**: **Layer C finished and frontend slice 4
+  shipped.** 354 backend tests, 68 frontend. Three commits: `07085df` C9,
+  `ebc145b` conversation delete, `3ffe131` slice 4 with the markdown renderer.
+  Full detail in `docs/PROGRESS.md`; the durable rules are already promoted
+  into **Standing gotchas** above and the decisions into §8.19.
+  **C9 landed against the live API** — model ids in config were checked with a
+  free `models.list` rather than assumed, and the two live tests are gated on
+  their own env var so a key in `.env` cannot silently bill a test run.
+  **Conversations can be deleted**, cascading in the database; the record was
+  silent on this, so §8.19 records it. **Soft delete was recommended first and
+  that recommendation was wrong** — its only argument was keeping generations
+  for the eval, and §8.18 had already put the harness on fixture conversations.
+  **Model replies are rendered markdown**, which supersedes the "no renderer,
+  and that is load-bearing" rule: the DOM-equals-storage equality is replaced
+  by verified source-offset stamps, and anything whose rendered text is not
+  literally its source becomes *atomic* rather than becoming wrong.
+  **Three silent failures in that layer**, all found by using the app rather
+  than by a test — see the gotcha; the class of bug is that nothing throws and
+  branching just stops being offered.
+  **The branch composer floats at the span**, after being built inline and
+  compacted first; inline meant scrolling away from the words being asked
+  about in order to ask about them.
+  **Next: the summarization and embedding write side** — `HierarchicalDecay`
+  and retrieval read tables nothing fills, so the thesis cannot be measured
+  yet.

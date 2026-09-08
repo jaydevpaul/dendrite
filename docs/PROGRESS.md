@@ -1723,3 +1723,104 @@ slice 6's inspector are both likely to want it.
 
 **Next:** **frontend slice 4 — span branching**. Unblocked: the edge and anchor
 routes have been done since the message layer.
+
+---
+
+## 2026-09-08 (second session) — C9, conversation delete, and rendered replies
+
+**Layer C is finished and frontend slice 4 shipped.** 354 backend tests (337 →
++7 delete, +10 offline client tests, 2 live ones skipped by default), 68
+frontend tests (48 → +20). Three commits: `07085df` C9, `ebc145b` delete,
+`3ffe131` slice 4 with the renderer.
+
+### C9 — the one concrete OpenAI client
+
+Written against the real API and verified with two live calls costing a
+fraction of a cent. `models.list` first, free, to check the model ids in config
+actually exist on the account rather than assuming — `gpt-5.6-luna`,
+`gpt-5.6-terra` and `text-embedding-3-small` all do.
+
+**Two things the wire format required**, both recorded in decision record 8.19:
+`stream_options={"include_usage": True}` or no usage arrives at all and every
+`Generation` row lands with null counts; and the usage frame carries an **empty
+`choices`**, so indexing the first choice on every frame turns every successful
+generation into an `IndexError` on its last one.
+
+**The offline tests are built from the SDK's own chunk models**, so a field
+renamed upstream fails in `pytest` rather than on the first real call. The two
+live tests are gated on `DENDRITE_LIVE_LLM=1` rather than on the key being
+present — otherwise putting a key in `.env` would quietly bill every test run.
+
+**One typo cost a round:** the client's `generate` took `message` and iterated
+`messages`, which is a `NameError` on the first call. Same family as the
+`Anchor.from_edge` slip in C2.
+
+### Deleting a conversation
+
+The record was silent on this, so it is a new decision (8.19). **Soft delete
+was recommended first and the recommendation was wrong** — the argument for it
+was keeping generations for the eval, and 8.18 had already settled that the
+harness runs on its own fixture conversations. So a flag would have meant
+holding data somebody asked to be rid of, for nothing. Hard delete.
+
+**The cascade is in the database**, not in the service: one `DELETE` takes the
+messages, every branch included, and their edges, generations, summaries and
+embeddings. `conversation.root_message_id` is `SET NULL` rather than `CASCADE`,
+because it points *down* into the conversation's own first message.
+
+**A fourth thing Alembic autogenerate gets wrong about this schema: it does not
+compare a foreign key's `ON DELETE` action at all**, and reports "no changes"
+for the whole migration. Hand-written, and verified in both directions.
+
+The confirm dialog started inline in the sidebar row and moved out the same
+hour — a 15rem column cannot say what is about to happen. Native `<dialog>` +
+`showModal()`, so Escape and the focus trap are free.
+
+### Rendered replies, and the mapping that keeps anchors exact
+
+The interesting part of the session. Slice 4's selection layer was built on the
+DOM text being the stored text; the renderer breaks that, and the fix is
+`source-spans.ts` stamping each verbatim run with its source offset. Full
+write-up in `frontend_design.md` and 8.19.
+
+**What the design turns on:** every stamp is verified against the source before
+it is emitted, and anything that fails the check — an escape, a KaTeX formula —
+becomes *atomic* rather than becoming wrong. A coarser anchor is a fine trade;
+a wrong one is a 422 in the good case and a mark over the wrong words in the
+bad one.
+
+**Three silent failures, all found by using the app rather than by the tests:**
+
+1. A branch off a formula resolved, counted as marked, and was therefore also
+   left off the list of unmarked branches — reachable from nowhere. Marks now
+   go round whole nodes, not only runs of text.
+2. `MarkedSpan` replaces the element the renderer stamped, so it has to copy
+   the stamp onto the mark it draws. Without it, one branch on a reply stopped
+   branching working anywhere in that reply until reload.
+3. Two boundaries with no stamped run around them fall back in opposite
+   directions and cross, and a crossed pair returned null — which withdraws the
+   offer with nothing on screen explaining why.
+
+Number 3 is the one to remember as a *class* of bug: **the failure mode of this
+whole layer is silence.** Nothing throws, the reply looks perfect, and
+branching just stops being offered. That is why the load-bearing test is a
+sweep over a kitchen-sink document asserting every measurable run contains
+exactly the source text it claims, rather than a set of cases.
+
+**The composer moved twice**: inline under the reply, then compacted, then
+floated at the span. Inline meant scrolling away from the words being asked
+about in order to ask about them. A centred modal with a blurred backdrop was
+the alternative and is worse for the same reason — it hides the referent.
+
+### Process note
+
+**Bash heredocs on this machine eat a level of backslash escaping.** A test
+file written that way ended up with real newlines where `\n` was intended and
+`\[` where `\\[` was, which esbuild reported as an unterminated string. Content
+with backslashes or newline escapes goes through the editor tools, not through
+`cat <<EOF`.
+
+**Next:** the **summarization and embedding write side**. Nothing populates
+`message_summary` or `message_embedding`, so `HierarchicalDecay` and retrieval
+silently degrade to plainer strategies — the thesis cannot be measured until
+they exist. Then slice 5's navigator, slice 6's picker, and the eval last.

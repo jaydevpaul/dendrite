@@ -502,7 +502,7 @@ The user's requirement is "smooth, not heavy."
 | ~~**1. Shell + auth**~~ **DONE** | done (2026-08-30) | Vite scaffold, Tailwind v4 + shadcn-idiom components, palette tokens, app shell, signup/login pages, route guards on `/auth/me`, logout, theme toggle |
 | ~~**2. Conversation list**~~ **DONE** | done (2026-08-31) | List, inline create, empty state, conversation detail with rename |
 | ~~**3. Linear chat**~~ **DONE** | done (2026-09-07) | Persistent sidebar, message thread, composer, SSE streaming, retry on an unanswered or unfinished reply |
-| 4. Span branching | edge routes + anchors | Text selection → branch action; anchored-span rendering |
+| ~~**4. Span branching**~~ **DONE** | done (2026-09-01) | Text selection → branch action, anchored-span rendering, branch navigation by re-rooting the thread |
 | 5. Tree navigation | ancestor walk | Sidebar tree, branch/continuation distinction |
 | 6. Strategy + eval | eval framework | Strategy picker, per-branch context inspector, token counts |
 
@@ -842,6 +842,12 @@ offsets when a branch is taken from a highlighted span, so it waits until that
 constraint is on the table. And there is still no strategy picker; the header
 shows the conversation's default and each reply shows what actually ran.
 
+> **Amended 2026-09-08.** The renderer arrived with slice 4, in the same
+> session, and it did have to carry its own DOM-to-source map — see *Rendered
+> replies* below. The strategy picker is still slice 6's; slice 4 added a
+> per-branch strategy menu in the composer, which is a different control.
+
+
 **No new proxy entry was needed.** All three routes nest under
 `/conversations`, which `vite.config.ts` already forwards — the reason to
 prefer nesting, not just tidiness.
@@ -874,6 +880,330 @@ the first piece of frontend logic that is pure, load-bearing and has real edge
 cases — a fork, an abandoned reply, an anchored child. It is the natural first
 thing to unit test, and adding Vitest is the decision that would let that
 happen.
+
+### Slice 4 — what shipped, and how it was verified
+
+```
+src/features/messages/
+├── anchor.ts            offsets, both directions
+├── anchor.test.ts
+├── selection.ts         a browser range -> offsets into the stored text
+├── selection.test.ts
+├── selection-markdown.test.ts   the same, over a rendered reply
+├── span-branch.tsx      the offer that follows a selection, and the prompt
+├── reply-markdown.tsx   the renderer, and the fenced-code block
+├── source-spans.ts      stamps rendered runs with their source offsets
+├── source-spans.test.ts
+├── math.ts              \[ \] -> $$, length-preservingly
+├── math.test.ts
+├── thread.test.ts       the path walk and the trail, now with a fork in them
+└── (thread.ts, message-turn.tsx, use-chat.ts revised)
+
+routes/conversation.tsx  ?from= re-roots the thread; the crumb out of a branch
+vitest.config.ts         first frontend test runner
+```
+
+**The one thing this slice is actually about: a browser selection is not the
+same units as a stored offset.** `Range` and `String` count UTF-16 code units;
+Python's `str` counts code points. One emoji in a reply and every offset after
+it is one too high, so the write comes back 422 — and where the highlighted
+words appear twice in the reply, it *succeeds while pointing at the wrong
+copy*. Both were reproduced against the running API: the same span, sent as
+UTF-16 offsets, is refused as "past the end of the parent message"; converted
+to code points, it is a 201.
+
+So the two spaces are kept apart by construction. Everything touching the DOM
+works in UTF-16 indices; `anchor.ts` converts at the last moment, on the way
+out, and back again to draw a stored span. There is no third place that has an
+opinion about offsets.
+
+**Under plain text, the DOM *is* the stored string.** With
+`whitespace-pre-wrap` the characters on screen are exactly the characters in
+the row, so a range over a reply measures straight into offsets with nothing in
+between. This is how the reader's own messages are still measured, and it is
+why they are still rendered that way.
+
+> **Superseded 2026-09-08, same session.** A renderer arrived, and it does
+> swallow syntax characters — so this equality no longer holds for a model
+> reply. What replaced it is a mapping the renderer carries; see *Rendered
+> replies* below, and decision record 8.19. The paragraph above still describes
+> the plain-text path exactly.
+
+**The measurement is `Range.toString()`, not `Selection.toString()` or
+`innerText`.** A range stringifies as the concatenated data of the text nodes
+it spans — the stored string. The other two apply layout rules and collapse
+whitespace, which is the one thing that must not happen here. (True of both
+paths: the stamped path measures the same way, only within one run at a time
+instead of across the whole reply.)
+
+**One listener for the thread, and a highlight that reaches a second message
+is refused.** The listener walks up from the selection’s start to the nearest
+element carrying `data-anchor-source`. That attribute is only set where the
+rendered text equals the stored text — never on a streaming turn, whose row is
+still blank — so its absence is what makes a turn unbranchable, rather than a
+check somewhere else.
+
+An anchor is one link into one parent, so a selection across two messages
+could only be honoured as a fragment of the first. Clamping it silently would
+hand back a branch off less text than was highlighted with nothing saying so,
+so nothing is offered at all and a second drag inside one reply works.
+Overshooting into the thread’s own padding is still fine — that is not another
+message — which is why the rule is “do not cross into another turn” rather than
+“do not leave the element”. It needs a second attribute, `data-turn`, on every
+turn including the unbranchable ones: a drag from a reply into the question
+below it crosses a message boundary without ever reaching a second *source*.
+
+**Whitespace at the ends of a highlight is dropped, and the offsets move with
+it.** Overshooting the last word by a space is the normal way to select text.
+A trailing newline inside `anchored_text` would be sent verbatim into the
+composed prompt, and a highlight of nothing but whitespace is refused rather
+than sent for the API to refuse.
+
+**The offer sits below the selection, and is dismissed rather than chased.**
+It is placed by a viewport rectangle, so it stops describing the text the
+moment anything moves — scroll and resize drop it. Below, not above: above
+covers the last line the reader just highlighted, which is the line they are
+looking at when they decide to branch. It commits on `mousedown` with the
+default prevented, because a mousedown outside the highlighted text collapses
+the selection, and the selection is the thing being acted on.
+
+**The anchor is taken when the offer is clicked, not when the branch is sent.**
+Focus moving into the composer's field drops the selection, so the offsets
+have to be read while they exist. It also means the span quoted above the
+field is the exact string that will be sent, rather than a second reading of
+the same range.
+
+**The branch composer picks how much context the branch gets.** `SpanOnly` is
+the default and is what an anchored link resolves to unprompted, so choosing it
+sends **no** `strategy_override` — the link answers for itself rather than
+storing a value that says the same thing. The other four write the override the
+schema has carried since the message layer, and it governs the branch's whole
+subtree.
+
+Not writing `SpanOnly` is more than tidiness: an override is inherited by later
+messages in the branch, and a stored `SpanOnly` would mean a follow-up composed
+from a span and nothing else. The backend already refuses to inherit it that far
+— an explicit `SpanOnly` deeper than one step answers with the conversation
+default instead — so not writing it keeps the stored intent and the resolved
+answer from ever disagreeing.
+
+Verified against the live API, both arms and their follow-ups: no override → the
+branch runs `SpanOnly` (branch default) and its follow-up runs the conversation
+default (branch boundary); `ParentOnly` → the branch runs `ParentOnly` (from the
+edge) and so does its follow-up.
+
+This is **not** slice 6's picker, which shows the composed context and token
+cost beside each arm so the choice can be made on evidence. Same argument as
+slice 3's conversation switch: it drives a field that already exists, and its
+absence made a designed capability unreachable. It needed one change to
+`MenuSelect`, which opened upward unconditionally for the prompt box at the
+bottom of the viewport — in the middle of a thread that covers the reply the
+span was taken from, so the direction is now a prop.
+
+**Branches live on the span they grew from, revealed by hovering it.** They
+shipped first as a standing list under the reply, and three or four rows of it
+was more furniture than the reply itself — while still saying nothing about
+*which* words each branch came from, so every row had to quote its span a
+second time. On the mark, the connection is the layout. Where two anchors
+overlap the tint doubles and hovering the shared run offers both, which is the
+whole reason the text is cut at every anchor boundary rather than once per
+anchor.
+
+**The mark is not a link.** Every reply is a selection surface, and a click
+inside one is how a reader places the caret before dragging out a phrase — so
+a mark that navigated on click would fire exactly when someone was reaching for
+the text around it. Hover takes nothing away; the rows inside the popover are
+what navigate. Three consequences worth naming: the mark is focusable, or the
+branches exist for a mouse only; the popover closes on a delay, because the
+pointer has to cross the gap between mark and panel to reach it; and it is
+fixed-positioned like the branch offer, because the thread scrolls in a pane
+that clips its own overflow — an absolutely positioned panel near the bottom
+would be cut off rather than overlapping the composer. Scroll, resize and
+Escape all drop it.
+
+**A branch with no span to hover keeps a row under the message.** Normally
+there are none. Two things land there: a branch off a message that is not a
+selection surface — a question, or a reply still streaming — and a branch whose
+anchor no longer matches the text. Both are unmarkable, and dropping them would
+make a real row in the graph unreachable.
+
+**A span whose stored text no longer matches its offsets is not drawn at all.**
+That only happens if the parent was edited underneath it, and relocating the
+anchor is a repair step the backend does not have yet. An unmarked span is
+honest; a mark at stale offsets highlights the wrong words. The branch still
+appears in the list, so nothing disappears.
+
+**A branch is navigated to by moving where the walk starts, not by a new
+view.** `?from=<message id>` re-roots `buildThread` at the branch's first
+message and the walk from there is the same one — continuations only, newest
+child. So a branch needs no second request and no second component: it is
+already in the graph the page has. It lives in the address bar so a branch can
+be linked to, reloaded and left with the back button, and moving into one
+pushes a history entry rather than replacing it.
+
+*Flagged, and this is the part the decision record is silent on.* Section 8.18
+puts the branch navigator in a right-hand panel behind a switch, and that
+panel does not exist. What shipped here is not it and does not pre-empt it:
+a crumb saying which path is on screen, and a list under each message of the
+branches off it. The crumb answers *where am I*; the panel answers *what else
+is in this conversation*, over a tree and a graph on one selection state. The
+two are complementary, but if the panel is meant to be the only way in, this
+slice's local affordances are the thing to reconsider — not the re-rooting,
+which the panel would need anyway to render a branch once selected.
+
+**A reply is only drawn on a path its question is on.** Walking out of a branch
+while its first reply is still arriving used to keep rendering that reply at
+the bottom of the main thread, under a question that was not there. The stream
+is not aborted by leaving the view — only by leaving the conversation — so the
+reply completes and appears where it belongs on the way back in.
+
+**Anchoring is offered on replies only.** The thesis is branching from a
+highlighted span inside an AI response, and the reader's own message is a
+question they wrote, not a surface to interrogate. The API is wider than this
+— nothing stops an anchor into a user message — so a branch created that way
+through the API still renders, still counts and is still navigable. Only the
+offer is withheld.
+
+**The conversation's fact line counts every message, not the path on screen.**
+Reading a branch does not make the rest of the conversation disappear.
+
+**First frontend test runner: Vitest and jsdom**, flagged at the end of slice 3
+and taken here because this is the slice with arithmetic in it. Forty-eight
+tests. `jsdom` earns its place for one thing — the range measurement — and the
+split is deliberate: `selection.ts` is the only file that needs a DOM, and
+everything downstream of the measurement is plain string work.
+`vitest.config.ts` is separate from `vite.config.ts` on purpose; the dev-server
+config carries the proxy that keeps the session cookie same-origin and should
+not gain a second job.
+
+What the tests pin down that a manual pass would not: a surrogate pair counted
+once, an index landing *inside* a pair snapped back to a whole character, a
+range measured across the marks an earlier branch left behind, a selection
+clamped at both ends of the message, overlapping anchors reporting both edges
+on the run they share, and the walk refusing to follow an anchored edge onto
+the main path.
+
+Verified against the live backend **through the proxy on :5173**. The anchor
+write path end to end: 201 signup → 201 create → 201 root → generate streams
+`start`/`chunk`/`chunk`/`done` → the reply read back → offsets taken from its
+text → 201 branch write, with the edge echoing the same two offsets and the
+same span → the branch's own generate reporting `SpanOnly` from
+`branch_default`, with no override on the edge → the graph reads four messages,
+three edges, one of them anchored. And the four refusals: offsets past the end
+of the parent, text disagreeing with the offsets, two of the three fields, and
+an empty span. Separately, the emoji case both ways, above. `npm run build`
+typechecks clean.
+
+### Rendered replies — the renderer, and how anchors survive it
+
+Shipped with slice 4, 2026-09-08. It supersedes the "no markdown renderer"
+rule twice stated above; the reasoning behind that rule is what shaped this,
+so both are left in place with the supersession marked rather than rewritten
+into a story where the constraint never existed.
+
+**Why it could not keep waiting.** The model writes markdown whether or not
+anyone renders it. Raw was not neutral — it showed the reader `**` around every
+emphasis, pipe characters where a table was meant, `##` above every heading and
+LaTeX source where a formula belonged.
+
+**What renders.** `react-markdown` with GFM (tables, task lists,
+strikethrough), KaTeX for formulae, and highlight.js for fenced code in a
+bordered block carrying its language and a copy button. The reader's own
+messages are *not* rendered: they were typed, not authored, and turning
+somebody's asterisks into bold puts words in their mouth.
+
+**The problem the renderer creates, and the shape of the fix.** `**bold**` in
+the row is `bold` on screen, so a highlight can no longer be measured against
+the rendered text — the offsets would be a few characters out, worse the
+further down the reply you highlight. What replaces the equality is a mapping
+that the parser already computed:
+
+- `source-spans.ts` is a rehype pass that runs **last**, after KaTeX and after
+  highlighting, and stamps every run of verbatim text with `data-src-start` and
+  `data-src-end` — where that run began in the stored message.
+- `selection.ts` resolves each boundary of a selection *within* one stamped run
+  and adds that run's stamp. It never measures across the whole reply, because
+  the characters between two runs — a fence's backticks, the blank line between
+  paragraphs — are in the stored string and not in the DOM at all.
+- **Every stamp is checked against the source before it is emitted.** Where the
+  rendered text is not literally the source slice it claims, the node is
+  stamped `data-src-atomic` and a selection touching it takes its whole range.
+  That covers an escaped asterisk, an entity, and a KaTeX formula — which is a
+  DOM tree containing the same characters twice, once visually and once as
+  MathML, so no point inside it maps to a single offset.
+- **Which mode applies is decided by the markup**, not by a prop: stamped runs
+  present means measure per run, absent means measure flat. A turn cannot be
+  rendered one way and measured the other.
+
+**Three failures found while building it, all of them silent.**
+
+- **A mark has to carry the stamp of the run it replaces.** `MarkedSpan` draws
+  its own `<mark>` in place of the stamped element, and without the attributes
+  copied across, that run becomes a hole with no offsets attached. One branch
+  on a reply then stopped branching working anywhere in it, until reload.
+- **Two boundaries with no stamped run around them fall back in opposite
+  directions** — start looks forward, end looks back — so they cross, and
+  `offsetsForRange` returned null. Null withdraws the offer with nothing on
+  screen explaining why. It now widens to the runs the selection actually
+  touches: coarser, still honest.
+- **A mark can go round a whole node.** A branch off a formula resolved, so it
+  counted as marked, so it was also left off the list of unmarked branches
+  under the message — and nothing drew it in the reply. The branch existed and
+  was reachable from nowhere.
+
+**`\[ … \]` becomes `$$ … $$` before parsing, and the swap is
+length-preserving.** Two characters in, two out, so the parser's positions are
+still positions in the stored string — the only reason any pre-parse rewrite is
+allowed here. `math.ts` asserts it and returns the original text unchanged if
+it ever fails, which costs a rendered formula and never an anchor. Fences are
+skipped, because LaTeX inside one is the example rather than the formula.
+Single-dollar math is off: prose with two dollar amounts in one paragraph would
+otherwise turn into a formula.
+
+**Syntax colours reuse `warn` and `danger` and never the accent.** No palette
+entry was added. The accent marks the current branch and the primary action; a
+code block full of green keywords would spend that meaning on punctuation.
+Comments are `dim` italic, identifiers `ink`, punctuation and numbers `muted`.
+
+**The composer floats at the span.** Built inline under the reply first and
+moved the same day: a reply can be pages long, so the field opened far below
+the words it was about and the reader had to scroll away from them in order to
+ask about them. A centred modal with a blurred backdrop was the other candidate
+and is worse for the same reason — it hides the referent, which is the whole
+point of an anchor. Unlike the offer, the composer is not dismissed on scroll:
+by then there is typing in it to lose. `focus({ preventScroll: true })` is
+load-bearing, because focusing a field the browser thinks is off-centre scrolls
+it into view and this one opens mid-thread.
+
+**Cost noted, not paid down.** KaTeX and highlight.js put the conversation
+chunk at ~646 kB (195 kB gzipped). Code-splitting is the answer when it starts
+to matter; it is recorded here so the number is not a surprise later.
+
+### Deleting a conversation
+
+**Two deliberate clicks, and the second one is a centred dialog.** There is no
+undo — the database cascades every message, branch and generation in the
+conversation — so the confirm names the conversation and says what goes with
+it. It was built inline in the sidebar row first and the row is 15rem wide:
+three lines and two buttons in that space read as a warning you cannot quite
+parse.
+
+**`ConfirmDialog` is a native `<dialog>` opened with `showModal()`.** Escape,
+the focus trap and the top layer come for free, and the backdrop is the
+browser's own — styled `bg-scrim` plus a 3px blur. **The blur is doing real
+work**: this palette's surfaces are close together in value, so darkening alone
+reads as the lights going down rather than as one layer in front of another.
+Cancel takes focus, so a stray Enter cannot delete.
+
+**The trash icon is quiet until the row is pointed at**, and always visible
+below `lg` where the list is a drawer and there is no hover. Same rule as the
+copy button on a code block.
+
+**Deleting the conversation you are reading navigates to `/app`.** The rows are
+gone; leaving the reader on the thread would show them a 404 where a
+conversation used to be. Both caches are *removed* rather than invalidated —
+the thread is keyed separately from the conversation and would otherwise
+outlive it, and a refetch could only 404.
 
 Note the graph view (decision record section 8.9) ships *after* slices 1–4
 and the eval framework, not before them.
