@@ -1,5 +1,8 @@
 from typing import Annotated
 
+from functools import lru_cache
+from app.llm.openai_client import OpenAIClient
+
 from fastapi import Cookie,HTTPException,Depends,status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,7 +32,7 @@ def get_llm():
     if settings.llm_client =="fake":
         return FakeLLMClient()
 
-    raise NotImplementedError("The reak client is not built yet")
+    return _openai_client()
 
 LLMDep= Annotated[LLMClient, Depends(get_llm)]
 
@@ -60,6 +63,11 @@ async def get_current_user(
     return user
 
 CurrentUser = Annotated[User,Depends(get_current_user)]
+
+
+@lru_cache
+def _openai_client():
+    return OpenAIClient()
 
 
     
