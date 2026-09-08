@@ -73,3 +73,14 @@ async def update_conversation(
     await session.commit()
     await session.refresh(conversation)
     return conversation
+
+
+async def delete_conversation(session:AsyncSession, conversation: Conversation):
+    """One DELETE. The foreign keys take the conversation's messages with it -
+    every branch included, since a branch is just a message in the same
+    conversation - and each message its edges, generations, summaries and
+    embeddings. There is no undo, so the confirm step lives in the UI."""
+
+    await session.delete(conversation)
+    await session.commit()
+

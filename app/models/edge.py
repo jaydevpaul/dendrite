@@ -14,12 +14,12 @@ class Edge(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=uuid7)
     parent_message_id: Mapped[uuid.UUID] = mapped_column(
-        UUIDType, ForeignKey("message.id"), nullable=False
+        UUIDType, ForeignKey("message.id", ondelete="CASCADE"), nullable=False
     )
     # unique=True: one parent max per child message; also satisfies the
     # btree index section 9 calls for on this column.
     child_message_id: Mapped[uuid.UUID] = mapped_column(
-        UUIDType, ForeignKey("message.id"), nullable=False, unique=True
+        UUIDType, ForeignKey("message.id", ondelete="CASCADE"), nullable=False, unique=True
     )
     anchor_start: Mapped[int | None] = mapped_column(nullable=True)
     anchor_end: Mapped[int | None] = mapped_column(nullable=True)

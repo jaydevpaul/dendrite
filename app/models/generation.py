@@ -14,10 +14,10 @@ class Generation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=uuid7)
     user_message_id: Mapped[uuid.UUID] = mapped_column(
-        UUIDType, ForeignKey("message.id"), nullable=False
+        UUIDType, ForeignKey("message.id", ondelete="CASCADE"), nullable=False
     )
     assistant_message_id: Mapped[uuid.UUID] = mapped_column(
-        UUIDType, ForeignKey("message.id"), nullable=False, unique=True
+        UUIDType, ForeignKey("message.id", ondelete="CASCADE"), nullable=False, unique=True
     )
     strategy_used: Mapped[str] = mapped_column(nullable=False)
     model_used: Mapped[str] = mapped_column(nullable=False)

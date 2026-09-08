@@ -20,7 +20,16 @@ class Conversation(Base):
     # conversation<->message circular FK so both tables can be created.
     root_message_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType,
-        ForeignKey("message.id", use_alter=True, name="fk_conversation_root_message_id"),
+        ForeignKey(
+            "message.id",
+            use_alter=True,
+            name="fk_conversation_root_message_id",
+            # SET NULL, not CASCADE: this column points down into the
+            # conversation's own first message, so cascading from it would let
+            # deleting one message take the conversation and every other
+            # message with it.
+            ondelete="SET NULL",
+        ),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(

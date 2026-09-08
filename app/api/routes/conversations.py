@@ -10,6 +10,7 @@ from app.schemas.conversation import ConversationCreate,ConversationOut,Conversa
 from app.services.conversation import (
     ConversationNotFound,
     create_conversation,
+    delete_conversation,
     list_conversation,
     update_conversation,
     get_owned_conversation,
@@ -58,3 +59,11 @@ async def update(
     return await update_conversation(
         session, conversation,body.model_dump(exclude_unset=True)
     )
+
+
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(conversation: OwnedConversation, session:SessionDep):
+    # OwnedConversation is what makes this safe: someone else's id 404s in the
+    # dependency, before this body runs.
+    await delete_conversation(session, conversation)
+

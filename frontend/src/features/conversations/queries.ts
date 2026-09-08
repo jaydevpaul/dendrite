@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ApiError } from "@/lib/api";
+import { messageKeys } from "@/features/messages/queries";
 import {
   createConversation,
+  deleteConversation,
   getConversation,
   listConversations,
   updateConversation,
@@ -68,6 +70,23 @@ export function useUpdateConversation(id: string) {
       // PATCH moves `updated_at`, which is the list's sort key, so the list
       // is genuinely stale -- not just showing an old title.
       void queryClient.invalidateQueries({ queryKey: conversationKeys.list });
+    },
+  });
+}
+
+export function useDeleteConversation(options?: { onSuccess?: (id: string) => void }) {
+  const queryClient = useQueryClient();
+
+  return useMutation<void, ApiError, string>({
+    mutationFn: deleteConversation,
+    onSuccess: (_, id) => {
+      // Removed, not invalidated: the rows are gone, so a refetch would only
+      // 404. Both caches, because the thread is keyed separately from the
+      // conversation itself and would otherwise outlive it.
+      queryClient.removeQueries({ queryKey: conversationKeys.detail(id) });
+      queryClient.removeQueries({ queryKey: messageKeys.graph(id) });
+      void queryClient.invalidateQueries({ queryKey: conversationKeys.list });
+      options?.onSuccess?.(id);
     },
   });
 }

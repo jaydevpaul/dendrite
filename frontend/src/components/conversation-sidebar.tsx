@@ -1,12 +1,18 @@
-import { Link, NavLink, useNavigate } from "react-router-dom";
-import { LogOut, PanelLeftClose, Plus } from "lucide-react";
+import { useState } from "react";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
+import { LogOut, PanelLeftClose, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Logo } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
 import { useLogout, useMe } from "@/features/auth/queries";
-import { useConversations } from "@/features/conversations/queries";
+import {
+  useConversations,
+  useDeleteConversation,
+} from "@/features/conversations/queries";
+import type { Conversation } from "@/features/conversations/api";
 
 /**
  * The persistent conversation list.
@@ -85,27 +91,11 @@ export function ConversationSidebar({
 
         <ul>
           {conversations?.map((conversation) => (
-            <li key={conversation.id}>
-              <NavLink
-                to={`/app/c/${conversation.id}`}
-                onClick={onNavigate}
-                title={`${conversation.title}\n${formatRelativeTime(
-                  conversation.updated_at,
-                )} · ${formatAbsoluteTime(conversation.updated_at)}`}
-                className={({ isActive }) =>
-                  cn(
-                    "block truncate rounded-md border-l-2 px-[10px] py-[6px] text-[13px] leading-[1.4] transition-colors",
-                    // The accent marks the thing you are in, which is the same
-                    // job it does for a branch edge and the current node.
-                    isActive
-                      ? "border-accent bg-accent-tint font-medium text-ink"
-                      : "border-transparent text-muted hover:bg-raised hover:text-ink",
-                  )
-                }
-              >
-                {conversation.title}
-              </NavLink>
-            </li>
+            <ConversationRow
+              key={conversation.id}
+              conversation={conversation}
+              onNavigate={onNavigate}
+            />
           ))}
         </ul>
       </nav>
@@ -134,6 +124,100 @@ export function ConversationSidebar({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * One row, and the delete it owns.
+ *
+ * Deleting is irreversible - the database cascades every message, branch and
+ * generation in the conversation - so it takes two deliberate clicks, the
+ * second in a centred dialog. It was tried inside the row first and the row is
+ * too narrow to say what is about to happen: three lines and two buttons in a
+ * 15rem column reads as a warning you cannot quite parse.
+ */
+function ConversationRow({
+  conversation,
+  onNavigate,
+}: {
+  conversation: Conversation;
+  onNavigate?: () => void;
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [confirming, setConfirming] = useState(false);
+
+  const path = `/app/c/${conversation.id}`;
+  const isOpen = location.pathname === path;
+
+  const remove = useDeleteConversation({
+    onSuccess: () => {
+      // Leaving the reader on a thread whose rows no longer exist would show
+      // them a 404 where a conversation used to be.
+      if (isOpen) navigate("/app", { replace: true });
+    },
+  });
+
+  return (
+    <li className="group relative">
+      <NavLink
+        to={path}
+        onClick={onNavigate}
+        title={`${conversation.title}
+${formatRelativeTime(
+          conversation.updated_at,
+        )} · ${formatAbsoluteTime(conversation.updated_at)}`}
+        className={({ isActive }) =>
+          cn(
+            // Room on the right for the delete button, so a long title
+            // truncates before it reaches the icon rather than under it.
+            "block truncate rounded-md border-l-2 py-[6px] pr-8 pl-[10px] text-[13px] leading-[1.4] transition-colors",
+            // The accent marks the thing you are in, which is the same
+            // job it does for a branch edge and the current node.
+            isActive
+              ? "border-accent bg-accent-tint font-medium text-ink"
+              : "border-transparent text-muted hover:bg-raised hover:text-ink",
+          )
+        }
+      >
+        {conversation.title}
+      </NavLink>
+
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        aria-label={`Delete ${conversation.title}`}
+        title="Delete conversation"
+        className={cn(
+          "absolute top-1/2 right-1 grid size-6 -translate-y-1/2 place-items-center rounded-sm text-dim transition-colors",
+          "hover:bg-danger-tint hover:text-danger focus-visible:text-danger",
+          // Hidden until the row is pointed at or tabbed into - but hover is
+          // not a thing on a touch screen, and below lg this list is the
+          // drawer, so there it stays visible.
+          "opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-lg:opacity-100",
+        )}
+      >
+        <Trash2 className="size-3.5" />
+      </button>
+
+      {confirming ? (
+        <ConfirmDialog
+          title="Delete this conversation?"
+          description={
+            <>
+              <strong className="font-medium text-ink">{conversation.title}</strong> and
+              every message and branch in it will be deleted. This cannot be undone.
+            </>
+          }
+          confirmLabel="Delete"
+          pendingLabel="Deleting"
+          pending={remove.isPending}
+          error={remove.isError ? remove.error.message : undefined}
+          onConfirm={() => remove.mutate(conversation.id)}
+          onCancel={() => setConfirming(false)}
+        />
+      ) : null}
+    </li>
   );
 }
 

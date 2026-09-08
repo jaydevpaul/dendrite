@@ -71,6 +71,18 @@ export function updateConversation(id: string, body: ConversationUpdate) {
 }
 
 /**
+ * 204 No Content, and there is no undo.
+ *
+ * The database cascades: every message in the conversation goes, branches
+ * included -- a branch is just a message in the same conversation -- and with
+ * them their edges, generations, summaries and embeddings. A 404 here means
+ * the same thing it means everywhere else: missing, or not yours.
+ */
+export function deleteConversation(id: string) {
+  return request<void>(`/conversations/${id}`, { method: "DELETE" });
+}
+
+/**
  * The server default, applied when POST /conversations carries no title. It is
  * the only value a derived title is allowed to replace -- a name the user
  * typed, or one they renamed to, is never overwritten.
