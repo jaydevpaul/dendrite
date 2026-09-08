@@ -299,6 +299,7 @@ and accent carry the identity.
 | `accent-ink` | `#232323` | 7.91:1 | Text on a filled accent surface |
 | `danger` | `#E58358` | 5.78:1 | Destructive actions, errors |
 | `warn` | `#DDC172` | 8.94:1 | Semantic only — never decorative |
+| `scrim` | `rgb(0 0 0 / 0.58)` | — | Behind an overlay panel — added 2026-09-08 |
 
 ### Light
 
@@ -317,6 +318,17 @@ and accent carry the identity.
 | `accent-ink` | `#FFFFFF` | 5.90:1 | Text on filled accent |
 | `danger` | `#B4522E` | 4.81:1 | |
 | `warn` | `#8A6A1F` | 4.83:1 | |
+| `scrim` | `rgb(28 27 24 / 0.38)` | — | Warm near-black, from `ink` — added 2026-09-08 |
+
+**Amended 2026-09-08 — one token added: `scrim`.** An addition to the locked
+set, not a change to it: no existing value moved and no new hue entered. The
+mobile conversation drawer needed something behind it, and it shipped as a raw
+`black/55`, which is wrong here. A 58%-black scrim over a warm-neutral dark
+ground is fine, but the same value over light's warm paper reads as a cold grey
+wash and fights the ink-on-paper premise — so light gets a warmer, lighter
+scrim derived from its own `ink` (`#1C1B18`) instead of pure black. No contrast
+measurement applies: a scrim is decorative, and the panel above it carries its
+own contrast against its own background.
 
 ### Two things that are easy to get wrong
 

@@ -46,7 +46,7 @@ export function AppShell() {
       {drawerOpen ? (
         <>
           <div
-            className="fixed inset-0 z-30 bg-black/55 lg:hidden"
+            className="fixed inset-0 z-30 bg-scrim lg:hidden"
             onClick={() => setDrawerOpen(false)}
             aria-hidden
           />

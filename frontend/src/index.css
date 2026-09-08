@@ -45,6 +45,11 @@
   --color-danger-tint: rgb(229 131 88 / 0.15);
   --color-warn: #ddc172;
 
+  /* Behind an overlay panel. Light gets a warm near-black at lower alpha
+     rather than the same black: 58% black over warm paper reads as a cold grey
+     wash, which is the one thing this palette is not. */
+  --color-scrim: rgb(0 0 0 / 0.58);
+
   /* The brand panel is dark in BOTH themes -- it is a brand surface, not a
      page surface -- so its text colours are fixed and never overridden below.
      `dim` is deliberately absent: it measures 4.20:1 against the lightest
@@ -80,6 +85,7 @@
   --color-danger: #b4522e;
   --color-danger-tint: rgb(180 82 46 / 0.09);
   --color-warn: #8a6a1f;
+  --color-scrim: rgb(28 27 24 / 0.38);
 }
 
 @layer base {

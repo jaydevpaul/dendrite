@@ -86,11 +86,17 @@ runner.
 **All twelve Layer C shape decisions are settled and written up as §8.15
 (D1–D12); the build decisions taken since are in §8.16 (C1–C2) and §8.17
 (C6–C8).** Do not re-litigate them. §8.15's D8, D9 and D11 each carry a dated
-correction or narrowing from this session — read the parentheticals, not just
-the headline.
+correction or narrowing — read the parentheticals, not just the headline.
 
-**The tree is clean, committed through `555be6d`.** Three commits closed out
-this work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
+**§8.18 settles two frontend shape questions** that slice 3 forced: which path
+the linear view walks (continuation edges only, newest child — the standing
+gotcha below says why both halves matter), and that the branch navigator now
+lives in a **right-hand panel behind a switch**, because the left sidebar holds
+the conversation list. The palette gained one token, `scrim`, recorded as a
+dated amendment in `frontend_design.md` §5.
+
+**The tree is clean, committed through `16c2dd5`.** Three commits closed out
+that work: `cddfeb3` for Layer C sittings C5-C8, `9fdf55f` for frontend slice
 3, and `555be6d` for the write-ups. 337 tests passing on a clean tree.
 
 ### Running it
@@ -329,6 +335,11 @@ Everything above C9 is already tested against the fake, so the only new risk is
 the wire format. Two things to keep: thinking stays on and held constant across
 all five arms, and token counts come from the provider's `usage`, never a local
 tokenizer.
+
+**Slice 5's navigator has a home now: a right-hand panel behind a switch,
+holding the tree and the graph over one selection state, its open state
+remembered per user and an overlay below `lg`** (§8.18). The left sidebar is
+the conversation list and stays that way.
 
 **Frontend slice 4 — span branching — is now unblocked and is the alternative
 to C9.** Slice 3 shipped, so linear chat is the main surface and the sidebar

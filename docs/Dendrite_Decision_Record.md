@@ -2,7 +2,7 @@
 type: project-decision-record
 project: Dendrite
 status: Phase 2 — data layer fully locked; ready for implementation
-updated: 2026-09-07
+updated: 2026-09-08
 ---
 
 # Dendrite — Complete Decision Record
@@ -1552,6 +1552,65 @@ default, which holds every chunk until the reply is finished; the stream still
 works and arrives all at once, so the failure reads as a very slow model rather
 than as a misconfigured proxy. It is inert today — there is no nginx in front of
 uvicorn — and set now because it is unfindable later.
+
+### 8.18 Which path the linear view walks, and where the branch navigator lives (decided 2026-09-08)
+
+Two decisions taken while building frontend slice 3. Both narrow rules that
+were already settled; neither contradicts one, and neither touches a column, an
+index, a migration, section 5's five strategies or section 6's topology.
+
+**The linear view walks continuation edges only, newest child at each step.
+(Narrows section 6.)** Section 6 locks that "a chat window the user sees is a
+**view** (a path through the graph computed at render time), not a stored
+entity" — but never says *which* path, and the message routes hand back every
+node and every link as two flat lists precisely because the answer is not in
+the data. It is now fixed, in `buildThread()`:
+
+- **Continuation-only.** An edge with anchor fields populated is a branch, and a
+  branch is a different thread of thought. Following one would mean that taking
+  a branch silently replaces what the linear view shows, so anchored edges are
+  never on the main path — they are counted on the message they hang off and
+  rendered by the tree and graph views.
+- **Newest child wins.** This is what makes section 6's "regeneration never
+  deletes" visible rather than merely true. Asking again writes a *second*
+  assistant child of the same user message; the newer attempt becomes the path
+  and the older one drops off it, reported on the question as an unshown
+  earlier reply. Oldest-wins would leave a failed or abandoned reply holding
+  the path permanently with the good one hidden behind a counter.
+
+*Rejected: a "canonical sibling" pointer.* It would make the choice explicit
+and stable, and it is a column against LOCKED section 9 for something the
+timestamps already answer — the same objection that killed a `status` column in
+8.15 D1. Ordering by `created_at` then `id` is deterministic and needs no
+write path.
+
+*Accepted cost, and the one thing to watch.* Section 7's harness generates five
+arms against one user message, which is five assistant siblings — so pointing
+it at a conversation a human is reading would make the linear view show
+whichever arm finished last. **The harness therefore uses its own fixture
+conversations, not live ones.** That is a constraint on the harness, deliberately
+not a "selected" column on the graph.
+
+**The persistent left sidebar holds the conversation list; the branch navigator
+moves to a right panel behind a switch. (Narrows 8.9.)** 8.9 settled that "both
+views ship; neither replaces the other — the sidebar tree remains the persistent
+navigator", written when the left sidebar was unoccupied. Slice 3 put the
+conversation list there, because the product has to read like an ordinary chat
+app before branching is layered on top: linear chat is the main surface, and
+the list of what else is open belongs beside it.
+
+So the tree and the graph move to a **right-hand panel over the same selection
+state**, with 8.9's tree/graph switch inside it. Everything 8.9 actually claims
+survives: both views still ship, switching still preserves the selected node
+and refetches nothing, and the tree is still the better of the two for reading
+one root-to-leaf path.
+
+Two narrowings that follow from it:
+
+- **The panel's open/closed state persists per user**, so "persistent
+  navigator" stays true in spirit rather than resetting on every load.
+- **Below `lg` the panel is an overlay**, the way the conversation list already
+  is. A thread between two side panels does not fit, and the thread is the job.
 
 ---
 

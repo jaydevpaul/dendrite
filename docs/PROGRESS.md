@@ -1436,3 +1436,44 @@ over the path with the blank row counted off it.
 `stream_options` with `include_usage`), or **frontend slice 4** — span
 branching, which the edge and anchor routes already support. Slice 4 no longer
 has a backend blocker.
+
+---
+
+## 2026-09-08 — Two frontend shape questions written into the record (§8.18)
+
+No feature work. The three items slice 3 flagged were decided and recorded.
+
+**1. Which path the linear view walks — recorded as a narrowing of section 6.**
+Continuation edges only, newest child at each step. Section 6 locks that the
+chat window is a *view* computed at render time but never says which path, and
+the flat-list message routes exist because the answer is not in the data.
+Newest-wins is what makes "regeneration never deletes" visible rather than
+merely true; oldest-wins would let a failed reply hold the path permanently.
+A "canonical sibling" column was rejected — a schema change for something the
+timestamps already answer, the same objection that killed a `status` column.
+**One constraint falls out of it:** section 7's harness writes five assistant
+siblings per user message, so it uses its own fixture conversations, never a
+conversation a human is reading.
+
+**2. Where the branch navigator lives — recorded as a narrowing of 8.9.** 8.9
+said the sidebar tree is the persistent navigator, written when the left
+sidebar was empty. Slice 3 put the conversation list there, so the tree and
+graph move to a **right-hand panel behind a switch** over the same selection
+state. Everything 8.9 claims survives: both views ship, switching preserves the
+selected node and refetches nothing. Two narrowings added: the panel's
+open/closed state persists per user, so it is still a *persistent* navigator,
+and below `lg` it is an overlay, because a thread between two side panels does
+not fit.
+
+**3. One palette token added: `scrim`.** The mobile drawer had shipped with a
+raw `bg-black/55` — the only hardcoded colour in the app. 58% black is fine
+over the dark ground and reads as a cold grey wash over light's warm paper, so
+light gets `rgb(28 27 24 / 0.38)`, derived from its own `ink`. Recorded as a
+dated amendment to the locked palette in `frontend_design.md` §5: an addition
+to the set, no existing value moved, no new hue. Verified the utility actually
+compiles — `bg-scrim{background-color:var(--color-scrim)}` with both theme
+values in the built CSS, since Tailwind silently emits nothing for a class it
+does not know.
+
+**Next:** sitting **C9** (needs a key), or **frontend slice 4 — span
+branching**, which is unblocked.
