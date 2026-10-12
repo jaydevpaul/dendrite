@@ -466,3 +466,33 @@
     text-decoration: line-through;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Landing on a message.
+
+   Clicking a turn in the navigator scrolls the thread to it, and a scroll on
+   its own does not say which of the turns now on screen was the one asked
+   for - especially when the click changed no view at all, which is the case
+   for every turn already on the path being read.
+
+   A ring rather than a tint. A tint behind a reply would sit under prose that
+   carries its own backgrounds in code blocks and tables, and a colour that
+   stays would read as a state the message is in rather than as something that
+   just happened. The offset keeps it off the words.
+   --------------------------------------------------------------------------- */
+
+@keyframes turn-landed {
+  from {
+    outline-color: var(--color-accent);
+  }
+  to {
+    outline-color: transparent;
+  }
+}
+
+.turn-landed {
+  border-radius: 12px;
+  outline: 2px solid transparent;
+  outline-offset: 6px;
+  animation: turn-landed 1.5s ease-out forwards;
+}

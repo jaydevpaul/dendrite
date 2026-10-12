@@ -3,6 +3,7 @@ import { GitBranch } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
 import { resolveAnchor, type AnchorRange } from "./anchor";
+import { plainPreview } from "./preview";
 import { ReplyMarkdown } from "./reply-markdown";
 import { SOURCE_END_ATTRIBUTE, SOURCE_START_ATTRIBUTE } from "./source-spans";
 import { ANCHOR_SOURCE_ATTRIBUTE, TURN_ATTRIBUTE } from "./selection";
@@ -351,7 +352,9 @@ function BranchPopover({
             className="flex w-full items-center gap-2 rounded-md px-2 py-[7px] text-left text-[12.5px] text-muted transition-colors hover:bg-accent-tint hover:text-ink"
           >
             <GitBranch className="size-[13px] shrink-0 text-accent" />
-            <span className="min-w-0 flex-1 truncate">{child?.content ?? "a branch"}</span>
+            <span className="min-w-0 flex-1 truncate">
+              {plainPreview(child?.content ?? "") || "a branch"}
+            </span>
           </button>
         );
       })}
@@ -478,12 +481,14 @@ function UnmarkedBranches({
             type="button"
             onClick={() => onOpen(edge.child_message_id)}
             className="flex max-w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] text-muted transition-colors hover:bg-accent-tint hover:text-ink"
-            title={`Branch from “${edge.anchored_text ?? ""}”`}
+            title={`Branch from “${plainPreview(edge.anchored_text ?? "")}”`}
           >
             <GitBranch className="size-[13px] shrink-0 text-accent" />
-            <span className="min-w-0 truncate">{child?.content ?? "a branch"}</span>
+            <span className="min-w-0 truncate">
+              {plainPreview(child?.content ?? "") || "a branch"}
+            </span>
             <span className="min-w-0 shrink truncate font-mono text-[10px] text-dim">
-              &ldquo;{edge.anchored_text}&rdquo;
+              &ldquo;{plainPreview(edge.anchored_text ?? "")}&rdquo;
             </span>
           </button>
         );

@@ -834,9 +834,19 @@ strategy from here on" already exists and needs no new code — `PATCH
 compose time, so the change applies to later compositions while
 `Generation.strategy_used` keeps the record of what each past reply used.
 
+*(Corrected 2026-09-09, building the composer's control — see 8.20. The last
+sentence is true on the trunk and false inside a branch carrying an override,
+which is the case this project exists to create: the walk stops at that branch,
+so `default_strategy` is never consulted and a PATCH of it composes nothing.
+The capability kept permitted two paragraphs up is what the fix uses — a
+`strategy_override` on the next message's own continuation edge — so "no new
+code" still holds for the backend. It was the wrong write path, not a missing
+one.)*
+
 A finer-grained per-message override is a UI question, not a schema one, and is
 logged in section 12: an override a user can set but cannot see is worse than
-not having one.
+not having one. *(Built 2026-09-09; that objection is what 8.20's marked pin
+answers.)*
 
 ---
 
@@ -1738,6 +1748,93 @@ run cost money.
 
 ---
 
+### 8.20 The composer's strategy control — what it shows, and what it writes (decided 2026-09-09)
+
+Found by using the app, not by a test. A message typed inside a branch composed
+with the branch's strategy while the control above the composer named the
+conversation default, and changing that control did nothing at all. Two
+symptoms, one cause, and resolution is not it: 8.13 was behaving exactly as
+written.
+
+**The control was answering a different question from the one it appeared to
+answer.** It read `Conversation.default_strategy` and wrote it straight back.
+On the trunk that is the value which composes, so it was correct there and
+nowhere else. 8.13 stops the walk at the nearest branch, and an explicit
+override on a branch edge is inherited by everything below it — so inside such
+a branch the conversation default is never consulted. The control was
+therefore naming a value with no say, sitting beside replies labelled with the
+value that did have one, and its writes landed in a column nothing downstream
+would read. It looked broken because, as a control, it was.
+
+**The sentence in 8.13 saying no new code was needed is the part that was
+wrong.** 8.13 closed with "the user-facing control for *change strategy from
+here on* already exists and needs no new code — `PATCH /conversations/{id}`
+accepts `default_strategy`, and resolution reads it live at compose time". That
+is true on the trunk and false inside any branch carrying an override, which
+is the case this whole project exists to create. 8.13 now carries a dated
+correction pointing here.
+
+**The displayed value is the server's own resolution, read per message.** The
+graph the page already holds contains every edge, so the client could work the
+answer out itself — and must not. The rule is four rules at once: the nearest
+override wins, an anchored link ends the walk whether or not it carries one,
+SpanOnly is never inherited downward, and a runaway walk falls back to the
+conversation. It exists in that shape because two earlier statements of it
+pointed different ways, which is the whole of 8.13. A second copy in
+TypeScript would not break when it drifted from the resolver; it would answer
+differently from the code that actually composes the prompt, and the only
+symptom would be a control quietly showing the wrong name — which is the bug
+being fixed here, arrived at a second way.
+
+It is read from `GET .../{message_id}/ancestors` with `max_depth=0`. That route
+answers the chain and the resolution together, and at zero depth the chain
+comes back empty while the resolution is unaffected — so the control costs one
+small request per thread tail rather than the text of every ancestor above it.
+
+**What the control writes is decided by `source`, which is why `source` is on
+the wire.** A resolution whose source is not `edge` means the conversation
+default is composing, so the default is what moves — unchanged behaviour, and
+it still reaches every later reply in the conversation. A resolution whose
+source *is* `edge` means some link above is composing and the default cannot
+speak over it, so the choice is written as a `strategy_override` on the next
+message's own link, where it governs the rest of that thread exactly the way a
+branch's own override governs its subtree. Both mechanisms already existed:
+8.13 deliberately kept `strategy_override` permitted on continuation edges,
+`MessageCreate` already accepts it, and the resolver already handles it. No
+backend code, no migration, no new column.
+
+A fallback resolution is also not read out of the response body. In that case
+the answer *is* `default_strategy`, so the control takes it live off the
+conversation it already has — which means a change to the default shows
+immediately instead of waiting for the resolution to be fetched again.
+
+**SpanOnly is excluded from what an edge can impose, because it never survives
+a step down.** Section 5 locks it to branches, and the resolver refuses to
+inherit it below depth 1. So a branch running SpanOnly hands its continuations
+back to the conversation default, and the control has to say so: a resolution
+of SpanOnly at the thread's tail is displayed as the default, because that is
+what the *next* message will get. For the same reason a pin can never be
+SpanOnly — a message typed into the composer has no span — and the type says
+so rather than a validator catching it.
+
+**A pin is marked on screen for as long as it is unwritten.** Section 12's
+objection to a per-message override was that "an override a user can set but
+cannot see is worse than not having one", and that is the one thing this had
+to answer. Between choosing a strategy and sending the message the choice
+exists only in the page, so the control is accent-bordered while it is held,
+its tooltip says the value is not written until the message is sent, and it
+clears on send — at which point the edge carries it and the control goes back
+to reporting a resolution. Walking to another view clears it too: it was
+chosen for the thread the reader was in.
+
+**Nothing here changes resolution, the schema, or section 5.** The walk, the
+six `source` values, the five strategies and every column are as they were.
+What changed is which of two existing write paths the composer's control
+reaches for, and that it now reports what will happen rather than what it
+would once have caused.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:
@@ -2015,14 +2112,20 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   which fires on any UPDATE — so persisting a stream chunk by chunk would make
   the annotation false.~~ **RESOLVED 2026-09-02** → the stream is buffered and
   written once, so both stay true as written; section 8.14.
-- **Per-message strategy override in the UI.** The column already accepts one on
+- ~~**Per-message strategy override in the UI.** The column already accepts one on
   any edge (8.13), and the resolver already handles it, so this is a surface
   question rather than a schema one: an override a user can set but cannot see
   is worse than not having one. The `source` field on a strategy resolution
   (8.13) is what such a display would read. Until then, `PATCH
   /conversations/{id}` with a new `default_strategy` is the user-facing control
   for "compose everything from here on this way". *Trigger: when the chat
-  surface can display which strategy produced a reply, and why.*
+  surface can display which strategy produced a reply, and why.*~~
+  **RESOLVED 2026-09-09** → section 8.20. The trigger fired as written — the
+  thread labels each reply with the strategy it ran under — and the composer's
+  control now reads the resolution rather than the default, writes whichever of
+  the two paths is actually deciding, and marks a chosen-but-unsent override so
+  it can be seen. It reads `source`, exactly as anticipated. Frontend only: no
+  column, no migration, no change to resolution.
 - ~~**"Current summary" selection rule** in code (when a message has several
   summaries) — *trigger: when selection actually matters, likely Weeks 7–14.*~~
   **RESOLVED 2026-09-06** → most-recent non-blank, ordered `created_at DESC, id

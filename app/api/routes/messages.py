@@ -36,9 +36,12 @@ from app.schemas.message import(
 )
 from app.services.message import (
     InvalidAnchor,
+    MessageNotInConversation,
+    NotABranch,
     ParentNotFound,
     RootAlreadyExists,
     create_message,
+    delete_branch,
     list_conversation_graph,
 )
 
@@ -173,13 +176,25 @@ async def generate(
     )
 
 
+@router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete(
+    message_id: uuid.UUID, conversation: OwnedConversation, session: SessionDep
+):
+    """Delete a branch and everything grown inside it.
 
+    Only a branch: a message in the middle of a thread would take the rest of
+    that thread with it, and the root message means the conversation, which is
+    deleted by its own route.
+    """
 
-
-
-
-
-
-
-
-
+    try:
+        await delete_branch(session, conversation, message_id)
+    except MessageNotInConversation as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Message not found"
+        ) from exc
+    except NotABranch as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Only a branch can be deleted; this message is {exc}.",
+        ) from exc

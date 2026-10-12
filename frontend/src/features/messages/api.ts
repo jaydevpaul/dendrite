@@ -60,6 +60,38 @@ export interface Message {
   pending: boolean;
 }
 
+/** Mirrors `StrategyResolutionOut`: what will compose, and what decided it. */
+export interface StrategyResolution {
+  strategy: AnyStrategy;
+  source: StrategySource;
+  edge_id: string | null;
+}
+
+/**
+ * What composes this message, and why.
+ *
+ * Read from the server rather than worked out from the graph this page already
+ * holds, and that is deliberate. The rule is four rules at once - the nearest
+ * override wins, an anchored link ends the walk whether or not it carries one,
+ * SpanOnly is never inherited downward, and a runaway walk falls back to the
+ * conversation - and it exists in that shape because two earlier statements of
+ * it pointed different ways. A second copy in TypeScript would not break when
+ * it drifted; it would quietly answer differently from the code that actually
+ * composes the prompt, and the only symptom would be a control showing the
+ * wrong name.
+ *
+ * `max_depth=0` because only the resolution is wanted, and it is what makes
+ * this cheap: the route answers the chain and the resolution together, and at
+ * zero depth the chain comes back empty while the resolution is unaffected.
+ * Without it every keystroke's worth of control state would be carrying the
+ * text of the whole thread above it.
+ */
+export function fetchStrategyAt(conversationId: string, messageId: string) {
+  return request<{ strategy: StrategyResolution }>(
+    `/conversations/${conversationId}/messages/${messageId}/ancestors?max_depth=0`,
+  ).then((body) => body.strategy);
+}
+
 /**
  * Mirrors `EdgeOut`. All three anchor fields populated means this link is a
  * branch off a highlighted span; all three null means it continues the thread.
@@ -124,3 +156,19 @@ export function listMessages(conversationId: string) {
 export function generatePath(conversationId: string, messageId: string) {
   return `/conversations/${conversationId}/messages/${messageId}/generate`;
 }
+
+/**
+ * Delete a branch and everything grown inside it. 204, and no undo.
+ *
+ * Only a branch: the backend answers 422 for a message in the middle of a
+ * thread, because deleting one would take the rest of that thread with it,
+ * and for the conversation's root, which is what deleting the conversation
+ * means. A message that is not in this conversation answers 404, the same as
+ * everywhere else.
+ */
+export function deleteBranch(conversationId: string, messageId: string) {
+  return request<void>(`/conversations/${conversationId}/messages/${messageId}`, {
+    method: "DELETE",
+  });
+}
+

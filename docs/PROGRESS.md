@@ -1824,3 +1824,150 @@ with backslashes or newline escapes goes through the editor tools, not through
 `message_summary` or `message_embedding`, so `HierarchicalDecay` and retrieval
 silently degrade to plainer strategies — the thesis cannot be measured until
 they exist. Then slice 5's navigator, slice 6's picker, and the eval last.
+
+---
+
+## 2026-09-09 — Frontend slice 5: the branch navigator, and branch delete
+
+Written up from the working tree rather than from a session transcript — this
+work was done in a separate chat, so what follows is what the code says, and
+the reasoning is quoted from the comments the author left rather than
+reconstructed. Anything that was decided and *not* written down in a comment is
+not here.
+
+**368 backend tests** (2 skipped — the live LLM pair, gated on their own env
+var) and **96 frontend**, up from 354 and 68. All of it uncommitted.
+
+### The navigator — `frontend/src/features/navigator/`
+
+Five new files: `turns.ts` (302 lines, the tree build and its layout),
+`turn-tree.tsx`, `turn-graph.tsx`, `navigator-panel.tsx`, and `turns.test.ts`
+(15 tests). The panel is the right-hand column the record already settled on,
+behind the `Network` switch now sitting beside the conversation title.
+
+**A turn fuses a user message with its reply into one node, and the fusion
+splits the moment a question has more than one reply.** The fusion is a
+*rendering* choice only — the message is still the stored unit and still what
+an anchor points into. Fusing is what makes an ordinary conversation draw as a
+column of turns instead of a ladder of alternating half-cards; splitting on a
+second reply is what keeps regeneration and the eval's five-arm fan-out
+visible, since those are the cases message-as-node exists to represent.
+
+**Layout is deterministic, and that is why there is no graph library.** Every
+node has exactly one parent, so this is a tree: depth sets the row and a tidy
+left-to-right sweep sets the lane. Nothing settles, so two screenshots of the
+same conversation are identical — which matters for a project whose deliverable
+is a published evaluation. `MAX_NODES = 2000` is a hard stop against a
+malformed graph.
+
+**Sibling ordering matches the linear walk.** `newestFirst` in `turns.ts`
+breaks a `created_at` tie on `id`, the same rule `buildThread` uses, so the
+navigator and the thread cannot disagree about which child is the current one.
+Siblings drawn side by side use the reverse, oldest-first, because that is
+reading order.
+
+**Selecting is separate from going there.** A click selects; the footer, a
+double-click and Enter open the path. Opening on every click would move the
+thread under the reader while they were still looking around. The selection
+lives on the panel rather than in either view, which is what lets the
+tree/graph switch preserve it — both views draw from the graph the page already
+has, so switching is a render and refetches nothing.
+
+**`viewFrom` is carried down during the build, not recomputed by climbing.**
+Each node knows what `?from=` has to hold for the linear view to show it,
+because the build already knows which view it is inside.
+
+### Both side panels are resizable
+
+`frontend/src/lib/panel-size.ts` and `frontend/src/components/ui/resize-handle.tsx`.
+`SIDEBAR_BOUNDS` is 264 default / 200–460, `NAVIGATOR_BOUNDS` is 320 / 240–620
+because the graph is the widest thing in the app.
+
+**Width is stored per browser; the navigator's open state is stored per user.**
+Deliberately different, and both are argued in the files: a width is a fact
+about the window it was dragged in, so carrying 420px from a monitor onto a
+laptop would be restoring a preference nobody has — while "remember it open" is
+a habit, and two people sharing a browser should not inherit each other's. The
+open state is still `localStorage` rather than a stored preference, so it is
+per user *per browser*; inventing a preferences endpoint for one boolean was
+not worth a column.
+
+**Every width is clamped against the viewport as well as its own bounds**, with
+a `THREAD_FLOOR` of 420px. A panel dragged wide on a big monitor cannot squeeze
+the thread to nothing on a small one.
+
+`readNavigatorOpen` is read synchronously in a `useState` initialiser and never
+in an effect — read in an effect and the panel renders closed and jumps open on
+every load. `useMe` can resolve a beat late on reload, so an effect re-reads
+once the id arrives, guarded on a ref so it runs once.
+
+### Branch delete — `DELETE /conversations/{id}/messages/{message_id}`
+
+`delete_branch()` in `app/services/message.py`, the route in
+`app/api/routes/messages.py`, 14 tests in `tests/test_branch_delete.py`.
+
+**Only a branch can be deleted.** Two refusals, both 422 via `NotABranch`: the
+conversation's root, because deleting that is deleting the conversation and
+that has its own route; and a continuation, because deleting a message in the
+middle of a thread would silently take the rest of the thread with it. A
+message outside the conversation is `MessageNotInConversation` → 404, the same
+answer and the same reason as everywhere else.
+
+**The messages are deleted explicitly, not by cascade, and the reason is
+structural.** A message does not point at its parent — the edge does. So
+deleting one message takes its edges with it and leaves its children as
+messages nothing points at, and *a message nothing points at is exactly how the
+root of a conversation is identified*. Cascading would produce a conversation
+with several roots and a thread that walks whichever it found first.
+
+**`_descendant_ids` is a recursive CTE joining on `parent_message_id`** — the
+exact opposite of the ancestor walk, where joining on that column is the bug
+that hangs. Going down, the fan-out is the point. Both the seed and the
+recursive step filter `conversation_id` inside the CTE, for the same reason the
+ancestor walk does. `SUBTREE_SAFETY_CAP = 200` mirrors the walk's guard. The
+final `DELETE` re-states the conversation filter as belt and braces, so a bug
+in the walk is a no-op rather than a cross-conversation delete.
+
+On the client, `useDeleteBranch` **invalidates rather than patches**: the delete
+takes a whole subtree, and working out locally which rows went would be
+re-implementing the server's walk somewhere it can drift. The conversation list
+is invalidated too, since its ordering and its count both just moved. The
+confirm dialog from the sidebar delete is reused.
+
+### `plainPreview` — `frontend/src/features/messages/preview.ts`
+
+13 tests. Anywhere a reply is **quoted rather than read** — a navigator row, a
+graph card, a branch crumb, the span above the branch composer — it has to be
+plain text, or the reader is shown `**attention layer**` and
+`\[ \text{score}(Q,K) = QK^T \]` where a phrase belongs. That is the same
+failure as not rendering a reply at all, only in miniature.
+
+Deliberately **not** a markdown parser: a preview has no structure, so what is
+wanted is the words with the syntax taken off, and running the real pipeline
+would mean rendering to a DOM and reading its text back for every row in a
+list. Also deliberately **only** for previews — nothing anchored is computed
+from its output, so it can rewrite as freely as it likes with no risk of moving
+a branch.
+
+Maths is stripped first, and that order is the one thing in the file that is
+not arbitrary: `\[` is a LaTeX delimiter to this app, but read as markdown it
+is an escaped bracket, so anything handling escapes earlier would leave the
+brackets in and the formula wrapped in them. Applied at five call sites in
+`message-turn.tsx` and `conversation.tsx` — the branch popover, the unmarked-
+branch list and its title, the branch composer's quote, and the branch trail's
+crumbs and titles.
+
+### Also in the tree
+
+`design/` is untracked and holds a design canvas: `Main.dc.html`,
+`Problem.dc.html`, `canvas.json`, and a **2.5MB**
+`dendrite-context-strategies.html`. Nothing in the app imports it. Whether it
+belongs in the repo, in `docs/`, or in `.gitignore` has not been decided.
+
+### Next
+
+**The summarization and embedding write side** is still the gap that matters,
+and is now the only thing between here and a measurable thesis: nothing
+populates `message_summary` or `message_embedding`, so two of the five arms
+read tables that are always empty and degrade quietly to plainer strategies.
+After that, slice 6's strategy picker, then the eval.

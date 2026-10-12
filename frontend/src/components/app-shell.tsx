@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/brand";
 import { ConversationSidebar } from "@/components/conversation-sidebar";
 import { readSidebarCollapsed, writeSidebarCollapsed } from "@/lib/sidebar";
+import { SIDEBAR_BOUNDS } from "@/lib/panel-size";
+import { ResizeHandle, useResizablePanel } from "@/components/ui/resize-handle";
 
 /**
  * The chrome every authenticated screen sits inside: the conversation list on
@@ -27,6 +29,9 @@ export function AppShell() {
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
+  // Only the column is resizable. The drawer is a fixed overlay at a width
+  // the window chooses, and dragging it would be dragging the window.
+  const sidebar = useResizablePanel("sidebar", SIDEBAR_BOUNDS);
 
   // One button reveals the list, and what that means depends on the width.
   // Both calls are harmless in the other layout: the drawer is `lg:hidden`,
@@ -58,8 +63,19 @@ export function AppShell() {
   return (
     <div className="flex h-dvh overflow-hidden">
       {collapsed ? null : (
-        <aside className="hidden w-[264px] shrink-0 border-r border-line lg:block">
+        <aside
+          style={{ width: sidebar.width }}
+          className="relative hidden shrink-0 border-r border-line lg:block"
+        >
           <ConversationSidebar onCollapse={collapseList} />
+          <ResizeHandle
+            side="left"
+            width={sidebar.width}
+            bounds={sidebar.bounds}
+            onDrag={sidebar.set}
+            onCommit={sidebar.commit}
+            label="Resize the conversation list"
+          />
         </aside>
       )}
 

@@ -44,7 +44,7 @@ populated → branch, null → continuation; regeneration never deletes.
   section only when he asks where something is written down. (Applies to code
   written from 2026-09-05 on; `tests/test_llm_fake.py` predates it.)
 
-## Current state (2026-09-08)
+## Current state (2026-09-09)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
@@ -84,13 +84,20 @@ and composer (`span-branch.tsx`), marks with a popover of the branches that
 grew from them, and `?from=` re-rooting the thread** · **markdown-rendered
 replies with the source-offset mapping that keeps anchors exact
 (`reply-markdown.tsx`, `source-spans.ts`, `math.ts`)** · **the sidebar delete
-with its confirm dialog (`components/ui/confirm-dialog.tsx`)** · 68 frontend
-tests in Vitest + jsdom.
+with its confirm dialog (`components/ui/confirm-dialog.tsx`)** ·
+**branch delete (`DELETE /conversations/{id}/messages/{message_id}`,
+`delete_branch()` and its descendant walk in `app/services/message.py`)** ·
+**frontend slice 5 — the branch navigator: a right-hand panel holding a tree
+and a graph over one selection, both drawn from the graph the page already has
+(`frontend/src/features/navigator/`), its open state remembered per user
+(`lib/navigator.ts`), and both side panels resizable against a thread floor
+(`lib/panel-size.ts`, `components/ui/resize-handle.tsx`)** · **`plainPreview`
+(`features/messages/preview.ts`), used everywhere a reply is quoted rather than
+read** · 96 frontend tests in Vitest + jsdom.
 
 **Not built:** summarization (the write side — nothing populates
 `message_summary` yet), the embedding write side (nothing populates
-`message_embedding` yet either), eval framework, the graph navigator (slice 5),
-slice 6's strategy picker. **The two write sides are the important gap:**
+`message_embedding` yet either), eval framework, slice 6's strategy picker. **The two write sides are the important gap:**
 `HierarchicalDecay` and retrieval both read tables nothing fills, so they
 silently degrade to plainer strategies and §7's whole comparison is
 unmeasurable until they exist.
@@ -119,11 +126,19 @@ supersedes the old "no markdown renderer, and that is load-bearing" rule and
 replaces the DOM-equals-storage equality with a verified source-offset
 mapping; and the two wire-format facts C9 turned out to need.
 
-**The tree is clean, committed through `3ffe131`.** Three commits closed out
-that work: `07085df` for C9, `ebc145b` for conversation delete, and `3ffe131`
-for slice 4 together with the renderer — one commit, because separating them
-would have meant splitting hunks in `selection.ts` and `message-turn.tsx`.
-354 backend and 68 frontend tests passing on a clean tree.
+Committed through `3273536`. **Uncommitted: all of slice 5 and branch
+delete** — `frontend/src/features/navigator/`, `lib/navigator.ts`,
+`lib/panel-size.ts`, `components/ui/resize-handle.tsx`,
+`features/messages/preview.ts` and its test, `tests/test_branch_delete.py`,
+`delete_branch()` in `app/services/message.py`, the DELETE route, and the
+changes in `app-shell.tsx`, `conversation.tsx`, `message-turn.tsx`, `api.ts`
+and `queries.ts`. **368 backend** (2 skipped, the live LLM pair) and **96
+frontend** passing.
+
+**`design/` is untracked and undecided.** A design canvas — `Main.dc.html`,
+`Problem.dc.html`, `canvas.json`, and a 2.5MB
+`dendrite-context-strategies.html`. Nothing in the app imports it, and whether
+it belongs in the repo, in `docs/`, or in `.gitignore` has not been settled.
 
 ### Running it
 
@@ -131,7 +146,7 @@ would have meant splitting hunks in `selection.ts` and `message-turn.tsx`.
 docker compose up -d                          # Docker Desktop must be running
 uvicorn app.main:app --reload --port 8000     # repo root, .venv active
 cd frontend && npm run dev                    # :5173
-pytest                                        # repo root, 337 passing
+pytest                                        # repo root, 368 passing
 ```
 
 **Run pytest as `.venv/Scripts/python.exe -m pytest`** if the venv is not
@@ -313,6 +328,26 @@ there silently re-breaks the connection.
   rejects special-use and reserved domains, so manual verification through the
   proxy needs an ordinary-looking domain. The failure reads as a broken signup
   route and is not one.
+- **Deleting a message cannot be left to a cascade, because a message does not
+  point at its parent — the edge does.** Cascading from one message takes its
+  edges and leaves its children as messages nothing points at, and *a message
+  nothing points at is how the root of a conversation is identified*. The
+  result is a conversation with several roots and a thread that walks whichever
+  one it finds first. `delete_branch()` therefore collects the whole subtree
+  itself and deletes the messages explicitly.
+- **The descendant walk joins on `parent_message_id`, and there that is
+  correct** — the exact opposite of the ancestor walk, where joining on that
+  column is the bug that fans out and hangs. Going down, the fan-out is the
+  point: a message may have several children and all of them are going. Do not
+  "fix" either walk into the other. Both filter `conversation_id` inside the
+  CTE, in the seed and the recursive step, and both carry a 200-level guard.
+- **A reply that is *quoted* rather than read has to go through
+  `plainPreview()`.** The stored message is markdown, so a navigator row, a
+  graph card, a branch crumb or the span above the branch composer will show
+  `**attention layer**` and raw LaTeX where a phrase belongs — the same failure
+  as not rendering a reply at all, only in miniature. It is not a parser and it
+  is not reversible, so nothing anchored may be computed from its output;
+  anchor offsets are always counted against the stored string.
 - Do not pipe a backgrounded dev server through `tail` — it buffers and the log
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
@@ -445,14 +480,11 @@ The nine Layer C sittings, all done:
 | C8 | SSE route, the four events, `MessageOut.pending` | **done** |
 | C9 | The one concrete OpenAI client, against the real API | **done** |
 
-**After the write side:** slice 5's navigator — a right-hand panel behind a
-switch holding the tree and the graph over one selection state, its open state
-remembered per user and an overlay below `lg` (§8.18). The left sidebar is the
-conversation list and stays that way. Then slice 6's strategy picker, which
-shows the composed context and the token cost beside each arm — not the
-per-branch menu slice 4 already added. **The eval is last, and it is the only
-piece that costs real money**: ~$2.60 a run against a $20 budget, so it runs
-when there is something worth measuring.
+**After the write side:** slice 6's strategy picker, which shows the composed
+context and the token cost beside each arm — not the per-branch menu slice 4
+already added. Slice 5's navigator has shipped. **The eval is last, and it is
+the only piece that costs real money**: ~$2.60 a run against a $20 budget, so
+it runs when there is something worth measuring.
 
 ## Progress log
 
@@ -462,28 +494,40 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-08 (second session)**: **Layer C finished and frontend slice 4
-  shipped.** 354 backend tests, 68 frontend. Three commits: `07085df` C9,
-  `ebc145b` conversation delete, `3ffe131` slice 4 with the markdown renderer.
-  Full detail in `docs/PROGRESS.md`; the durable rules are already promoted
-  into **Standing gotchas** above and the decisions into §8.19.
-  **C9 landed against the live API** — model ids in config were checked with a
-  free `models.list` rather than assumed, and the two live tests are gated on
-  their own env var so a key in `.env` cannot silently bill a test run.
-  **Conversations can be deleted**, cascading in the database; the record was
-  silent on this, so §8.19 records it. **Soft delete was recommended first and
-  that recommendation was wrong** — its only argument was keeping generations
-  for the eval, and §8.18 had already put the harness on fixture conversations.
-  **Model replies are rendered markdown**, which supersedes the "no renderer,
-  and that is load-bearing" rule: the DOM-equals-storage equality is replaced
-  by verified source-offset stamps, and anything whose rendered text is not
-  literally its source becomes *atomic* rather than becoming wrong.
-  **Three silent failures in that layer**, all found by using the app rather
-  than by a test — see the gotcha; the class of bug is that nothing throws and
-  branching just stops being offered.
-  **The branch composer floats at the span**, after being built inline and
-  compacted first; inline meant scrolling away from the words being asked
-  about in order to ask about them.
-  **Next: the summarization and embedding write side** — `HierarchicalDecay`
-  and retrieval read tables nothing fills, so the thesis cannot be measured
-  yet.
+- **2026-09-09**: **Frontend slice 5 — the branch navigator — and branch
+  delete.** 368 backend tests (2 skipped, the live LLM pair) and 96 frontend, up
+  from 354 and 68. All of it uncommitted. Written up from the working tree
+  rather than a transcript, since the work was done in a separate chat — full
+  detail in `docs/PROGRESS.md`, durable rules promoted into **Standing
+  gotchas** above.
+  **The navigator is `frontend/src/features/navigator/`** — a tree view and a
+  graph view over one selection, both drawn from the graph the page already has,
+  so switching is a render and refetches nothing. **A turn fuses a question with
+  its reply into one node and splits the moment a question has more than one
+  reply**, which is regeneration and the eval's fan-out — the cases
+  message-as-node exists to represent. Fusion is a rendering choice only; the
+  message is still the stored unit and still what an anchor points into.
+  **Layout is deterministic and there is no graph library**: every node has one
+  parent, so depth sets the row and a sweep sets the lane, and two screenshots
+  of the same conversation are identical. Sibling order matches the linear
+  walk's newest-first-with-an-id-tiebreak, so the two views cannot disagree.
+  **Selecting is separate from going there** — a click selects, the footer, a
+  double-click and Enter open the path.
+  **Both side panels are now resizable**, and the two preferences are stored
+  differently on purpose: **width per browser** (a width is a fact about the
+  window it was dragged in), **open state per user** (a habit, and two people
+  sharing a browser should not inherit each other's). Every width is clamped
+  against the viewport with a 420px thread floor.
+  **Branch delete** is `DELETE /conversations/{id}/messages/{message_id}`, and
+  only a branch: the root is 422 because that is the conversation's own route,
+  a continuation is 422 because it would take the rest of the thread. The
+  subtree is collected by a recursive CTE and the messages deleted explicitly —
+  the cascade reasoning is now a standing gotcha. The client invalidates rather
+  than patches, because working out locally which rows went would re-implement
+  the server's walk where it can drift.
+  **`plainPreview()`** strips markdown wherever a reply is quoted rather than
+  read. Not a parser, and never used for anything anchored.
+  **`design/` is untracked and undecided** — a design canvas including a 2.5MB
+  HTML file that nothing imports.
+  **Next: the summarization and embedding write side**, unchanged and now the
+  only thing between here and a measurable thesis.

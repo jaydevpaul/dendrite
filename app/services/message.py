@@ -6,7 +6,7 @@ from app.models.edge import Edge
 from app.schemas.message import MessageCreate
 
 
-from sqlalchemy import select,func, update
+from sqlalchemy import delete, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 class ParentNotFound(Exception):
@@ -170,12 +170,127 @@ async def list_conversation_graph(
     return list(messages), list(edges)
 
 
+# A runaway guard, not a working depth. The mirror of the ancestor walk's cap
+# and there for the same reason: edge topology should make a cycle
+# unconstructible, and this is what stops the query if a future write path
+# ever manages one.
+SUBTREE_SAFETY_CAP = 200
 
 
+class MessageNotInConversation(Exception):
+    """No message with that id is visible in this conversation.
+
+    Does not distinguish "no such message" from "someone else's message", for
+    the same reason ConversationNotFound does not - the route answers 404 to
+    both, and a 403 would confirm the id exists."""
 
 
+class NotABranch(Exception):
+    """This message is not the first message of a branch.
+
+    Deleting a message takes everything under it, so the only message that can
+    be deleted is one whose whole subtree is a thing a reader chose to start:
+    a branch. Deleting a message in the middle of a thread would silently take
+    the rest of that thread with it, and deleting the root would be deleting
+    the conversation, which has its own route."""
 
 
+async def _attaching_edge(session: AsyncSession, message_id: UUID):
+    """The edge that points down at this message. None for the root."""
+
+    result = await session.execute(
+        select(Edge).where(Edge.child_message_id == message_id)
+    )
+    return result.scalar_one_or_none()
 
 
+async def _descendant_ids(
+        session: AsyncSession,
+        conversation: Conversation,
+        message_id: UUID,
+) -> list[UUID]:
+    """Every message below this one, however it was attached.
 
+    This walk goes *down*, so it joins on parent_message_id - the exact
+    opposite of the ancestor walk, where doing that is the bug. Down the tree
+    the fan-out is the point: a message may have several children, and all of
+    them are going.
+
+    Both the seed and the recursive step filter on conversation_id, inside the
+    CTE. Filtering after the walk would be too late - by then it has already
+    stepped through a foreign message into whatever hangs below it.
+    """
+
+    seed = (
+        select(
+            Edge.child_message_id.label("message_id"),
+            literal(1).label("depth"),
+        )
+        .join(Message, Message.id == Edge.child_message_id)
+        .where(
+            Edge.parent_message_id == message_id,
+            Message.conversation_id == conversation.id,
+        )
+    )
+
+    walk = seed.cte("descendant_walk", recursive=True)
+
+    step = (
+        select(Edge.child_message_id, walk.c.depth + literal(1))
+        .select_from(walk)
+        .join(Edge, Edge.parent_message_id == walk.c.message_id)
+        .join(Message, Message.id == Edge.child_message_id)
+        .where(
+            walk.c.depth < SUBTREE_SAFETY_CAP,
+            Message.conversation_id == conversation.id,
+        )
+    )
+
+    walk = walk.union_all(step)
+
+    result = await session.execute(select(walk.c.message_id).select_from(walk))
+    return list(result.scalars().all())
+
+
+async def delete_branch(
+        session: AsyncSession,
+        conversation: Conversation,
+        message_id: UUID,
+) -> int:
+    """Delete a branch and everything grown inside it. Returns the row count.
+
+    The messages are deleted explicitly rather than by cascade, because a
+    message does not point at its parent - the edge does. So deleting one
+    message takes its edges with it and leaves its children as messages
+    nothing points at, and a message nothing points at is exactly how the root
+    of a conversation is identified. The result would be a conversation with
+    several roots and a thread that walks whichever one it finds first.
+    """
+
+    message = await get_message_in_conversation(session, conversation, message_id)
+
+    if message is None:
+        raise MessageNotInConversation(message_id)
+
+    edge = await _attaching_edge(session, message_id)
+
+    if edge is None:
+        raise NotABranch("the conversation's root message")
+
+    if edge.anchor_start is None:
+        raise NotABranch("a continuation, not a branch")
+
+    doomed = [message_id, *await _descendant_ids(session, conversation, message_id)]
+
+    await session.execute(
+        delete(Message).where(
+            Message.id.in_(doomed),
+            # Belt and braces: the walk is already conversation-scoped, and
+            # this makes a bug there a no-op rather than a cross-conversation
+            # delete.
+            Message.conversation_id == conversation.id,
+        )
+    )
+    await session.commit()
+
+    return len(doomed)
