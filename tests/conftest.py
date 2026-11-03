@@ -141,20 +141,44 @@ async def llm():
     return FakeLLMClient()
 
 
+class RecordingQueue:
+    """Stands in for the arq pool: remembers each job instead of sending it.
+
+    Set `down` to make every enqueue raise, the way a stopped Redis would.
+    """
+
+    def __init__(self):
+        self.jobs = []
+        self.down = False
+
+    async def enqueue_job(self, function, *args, **kwargs):
+        if self.down:
+            raise ConnectionError("scripted: redis is down")
+        self.jobs.append((function, *args))
+
+
 @pytest_asyncio.fixture(loop_scope="session")
-async def client(session, session_factory, llm):
+async def queue():
+    """The job queue every route test runs against. Nothing reaches Redis."""
+    return RecordingQueue()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def client(session, session_factory, llm, queue):
     """An HTTP client driving the real app against the test database.
 
-    dependency_overrides swaps three things out. get_session becomes the test
+    dependency_overrides swaps four things out. get_session becomes the test
     session, so routes and assertions share one transaction view. get_llm
-    becomes the fake, so nothing reaches a real provider. And the session
-    factory becomes the test one: generation's completion write opens its own
-    session, and the app's factory points at the dev database, so without this
-    a streamed reply would be written somewhere no test can see.
+    becomes the fake, so nothing reaches a real provider. The session factory
+    becomes the test one: generation's completion write opens its own session,
+    and the app's factory points at the dev database, so without this a
+    streamed reply would be written somewhere no test can see. And get_queue
+    becomes a recorder - the transport below never runs the app's startup, so
+    the real Redis pool is never opened and a route asking for it would fail.
     """
     from httpx import ASGITransport, AsyncClient
 
-    from app.api.deps import get_llm, get_session_factory
+    from app.api.deps import get_llm, get_queue, get_session_factory
     from app.core.db import get_session
     from app.main import app
 
@@ -164,6 +188,7 @@ async def client(session, session_factory, llm):
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_session_factory] = lambda: session_factory
+    app.dependency_overrides[get_queue] = lambda: queue
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"

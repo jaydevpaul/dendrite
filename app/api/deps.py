@@ -3,9 +3,10 @@ from typing import Annotated
 from functools import lru_cache
 from app.llm.openai_client import OpenAIClient
 
-from fastapi import Cookie,HTTPException,Depends,status
+from fastapi import Cookie,HTTPException,Depends,status,Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from arq import ArqRedis
 
 from app.core.db import get_session,async_session_factory
 from app.core.config import settings
@@ -36,6 +37,11 @@ def get_llm():
 
 LLMDep= Annotated[LLMClient, Depends(get_llm)]
 
+def get_queue(request:Request):
+    """The worker's job queue, opened once when the server starts."""
+    return request.app.state.queue
+
+QueueDep = Annotated[ArqRedis,Depends(get_queue)]
 
 # Request rejection Msg common for every type of rejection
 CREDENTIALS_ERROR =HTTPException(

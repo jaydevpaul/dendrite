@@ -12,7 +12,9 @@ from app.services.generation import (
     stream_generation
 )
 
-from app.api.deps import SessionDep,LLMDep, SessionFactoryDep
+from app.core.queue import enqueue_embedding
+
+from app.api.deps import SessionDep,LLMDep, SessionFactoryDep,QueueDep
 from app.api.sse import frame
 
 
@@ -63,7 +65,7 @@ SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 @router.post("",response_model=MessageCreated, status_code=status.HTTP_201_CREATED)
 async def create(
-    body: MessageCreate, conversation: OwnedConversation, session: SessionDep
+    body: MessageCreate, conversation: OwnedConversation, session: SessionDep, queue:QueueDep
 ):
     try:
         message, edge = await create_message(session,conversation,body)
@@ -79,6 +81,8 @@ async def create(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
         ) from exc
+
+    await enqueue_embedding(queue,message.id)
 
     return MessageCreated(
         message=MessageOut.model_validate(message),
@@ -125,7 +129,8 @@ async def generate(
     conversation: OwnedConversation,
     session: SessionDep,
     llm: LLMDep,
-    session_factory: SessionFactoryDep
+    session_factory: SessionFactoryDep,
+    queue: QueueDep
 ):
     """Stream a reply to this user message."""
 
@@ -140,7 +145,7 @@ async def generate(
         ) from exc
 
     async def events():
-
+    
         yield frame(
             "start",
             {
@@ -159,6 +164,7 @@ async def generate(
             if isinstance(event, TextDelta):
                 yield frame("chunk",{"text": event.text})
             elif isinstance(event, GenerationDone):
+                await enqueue_embedding(queue,prepared.assistant_message_id)
                 yield frame(
                     "done",
                     {

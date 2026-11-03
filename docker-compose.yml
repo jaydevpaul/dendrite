@@ -19,6 +19,24 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:8
+    container_name: dendrite-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      # Redis keeps queued jobs on disk here, so a restart doesn't lose them.
+      - dendrite_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+
 volumes:
   dendrite_pgdata:
+    external: true
+  dendrite_redisdata:
     external: true

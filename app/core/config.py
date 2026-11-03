@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # specified: 8.6 fixes the 1-2s whole-compose budget, not this slice of it.
     retrieval_timeout_seconds: float = 1.0
 
+    # --- background jobs ---
+    # The Redis that arq queues jobs in. Port 6379 is the compose service.
+    redis_url: str = "redis://localhost:6379"
+
 
 
     @model_validator(mode="after")
