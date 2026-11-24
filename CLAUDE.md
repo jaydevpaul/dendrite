@@ -137,10 +137,8 @@ request, the summarizer as a fourth model id beside D11's three, the summary
 length as a share of the original, and a blank summary raised rather than
 stored. It closes §8.16's deferred model filter.
 
-Committed through `1f585e6`. **Uncommitted: the whole summary write side**
-(the files above plus `tests/test_summary_writer.py`, `test_summary_queue.py`,
-`test_summary_backfill.py` and edits to six existing test files). **441
-backend** (3 skipped, the live LLM trio) and **96 frontend** passing.
+Committed through `1a9e38e`; the tree is clean. **441 backend** (3 skipped,
+the live LLM trio) and **96 frontend** passing.
 
 **`design/` is gitignored** (`.gitignore` line 6, since `27b99d5`) — a local
 design canvas nothing in the app imports.
@@ -473,13 +471,11 @@ there silently re-breaks the connection.
 ## Next task
 **Close out the write side, then slice 6's strategy picker.**
 
-1. **Commit the summary write side**, together with the decision record's new
-   §8.21 and the dated notes it added to §8.16, §9 and §12.
-2. **Fill the dev database** — `python -m app.backfill_summaries` (100
+1. **Fill the dev database** — `python -m app.backfill_summaries` (100
    messages unsummarized on 2026-11-24) and the embeddings equivalent. With
    `DENDRITE_LLM_CLIENT=fake` the rows are placeholder text, which is fine for
    the UI and useless for anything measured.
-3. **Slice 6, the strategy picker** — shows the composed context and the token
+2. **Slice 6, the strategy picker** — shows the composed context and the token
    cost beside each arm, not the per-branch menu slice 4 already added. **It
    needs a backend capability first** (a compose-without-generating read), and
    no frontend slice starts before the backend it renders exists.
@@ -515,7 +511,8 @@ instead of leaving it buried in a dated entry.
 
 - **2026-11-24**: **The summary write side**, completing what the embedding
   write side (`1f585e6`, 2026-11-03, not logged at the time) started. 441
-  backend tests (3 skipped, the live LLM trio), up from 368. All uncommitted.
+  backend tests (3 skipped, the live LLM trio), up from 368. Committed as
+  `1a9e38e`.
   Built in four steps: the seam (`summarize(text, words)` on `LLMClient`, the
   fake and the OpenAI client; `summary_prompt(words)` in `app/llm/base.py`;
   five config keys), the writer (`summarize_message`, `find_unsummarized`,
