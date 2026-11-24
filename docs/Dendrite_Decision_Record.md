@@ -1398,7 +1398,9 @@ Two things make that recoverable rather than absorbed:
 *Trigger for closing this:* when Layer D lands summarization and a summarization
 model id enters config, pass it and section 9's rule holds as written.
 Immediately, and ahead of that, if summaries are ever regenerated with a
-different model while section 7's fixtures exist.
+different model while section 7's fixtures exist. *(Closed 2026-11-24: the
+trigger fired with the summary writer, and both decay arms now pass the
+configured id — see 8.21. The blank-row exclusion below is unaffected.)*
 
 **A blank summary is not a candidate at all (decided 2026-09-06, building
 C4).** `load_summaries()` excludes rows whose `summary_text` is empty or
@@ -1835,6 +1837,81 @@ would once have caused.
 
 ---
 
+### 8.21 The derived-data write side — embeddings and summaries (decided 2026-11-03 and 2026-11-24)
+
+Section 8.5 fixed *that* summaries are written asynchronously after a message
+lands, and named arq. It did not say which model writes them, how long a
+summary is, when the work is queued, or what happens to a message whose
+summary never lands. The embedding side had the same gaps. This records both as
+built. **No schema change**: both writers produce rows exactly as section 9
+defines them.
+
+**Queueing — both jobs, for every message, from one function.** Every place a
+message is written (the message route, and the generate route once a reply
+finishes) calls `enqueue_message_jobs()`, which queues `embed_message_job` and
+`summarize_message_job` on arq over Redis. One function rather than two calls,
+because a message with a summary but no embedding can never be promoted by
+retrieval, and one with an embedding but no summary is never a candidate; two
+write paths each queueing their own list would drift. Each job is queued
+separately, so one failing to queue does not stop the other. A failed reply is
+blank and queues nothing.
+
+**A queue outage never fails the request.** The message is committed before
+the enqueue runs, and neither job is needed to answer: a missing summary is
+8.6's full-text fallback, a missing embedding is `embedding_missing`. So an
+enqueue failure is logged and swallowed, and a backfill command
+(`python -m app.backfill_embeddings`, `python -m app.backfill_summaries`, each
+with `--dry-run`) finds and fills whatever the queue missed. Both writers are
+idempotent per message and model, which is what lets a retried job and a
+backfill run over the same rows.
+
+**Retries.** arq retries only a job that raises `Retry`, so each job converts
+any failure into one, deferred 10s x the attempt number, up to three tries.
+Anything left after that is the backfill's.
+
+**The summarizer is a fourth model id, extending D11.** D11 named ids for
+three call sites — generation, embedding, the judge. Summarization is now a
+fourth: `summarization_model = "gpt-5.6-luna"` at `summarization_effort =
+"none"`. Same model as generation, same vendor and SDK, thinking off because a
+description of one message needs none and thinking tokens would be paid on
+every message ever written. Called through a new `LLMClient.summarize(text,
+words)`, non-streamed, with `max_completion_tokens = words x 2 + 50` as a cost
+guard. `model_used` stores the configured id, not the provider's dated one,
+because that is what the reader compares against.
+
+**This closes 8.16's deferred model filter.** Its trigger was "a summarization
+model id enters config"; it has. Both decay arms now pass
+`model=settings.summarization_model` to `load_summaries()`, and section 9's
+"most recent for the active model" holds as written — the non-blank exclusion
+stays. Consequence: changing the summarizer id makes every existing summary
+invisible to composition until the backfill re-summarizes, which is the
+intended behaviour (8.16's confound) and costs a model call per message.
+
+**A summary's length is a share of the original.** The allowance is 15% of
+the message's words, held between 25 and 200 (`summary_ratio`,
+`summary_min_words`, `summary_max_words`). A fixed length was drafted first —
+one to three sentences — and rejected: a 2,000-word reply cut to two sentences
+loses facts the decay arm then lacks, which section 7 would report as decay
+being worse rather than the summary being too short; and three sentences about
+a one-line question are longer than the question. **The three numbers are
+tuning knobs**, and belong to section 12's open item on how the tunable arms
+get their hyperparameters: arm 4 now has four knobs and arm 5 six, not one and
+three.
+
+**Every non-blank message is summarized, however short.** Skipping short ones
+was considered and rejected: the reader would report them as
+`summary_missing`, and that degradation would stop meaning "the job is behind"
+— the one thing it exists to say.
+
+**A blank summary is never stored; it raises.** The model may answer with
+nothing. Stored, a blank row would be skipped by the reader (8.16) yet make the
+message look done to `find_unsummarized`, so nothing would ever retry it.
+Raised, the worker retries it and the backfill reports it as failed. The
+read-side rule from 8.16 stays as the backstop; `summary_text` stays plain
+`text NOT NULL` and an empty string is still legal in the column.
+
+---
+
 ## 9. Database Schema (field-level, locked)
 
 Global rules:
@@ -1917,7 +1994,10 @@ code and neither in the schema: the model half is deferred until a summarization
 model id exists in config, and a row whose `summary_text` is blank is excluded
 from selection entirely. The reader therefore selects most-recent non-blank; see
 8.16.** An empty string remains legal in this column — the exclusion is a
-read-side rule, not a constraint.
+read-side rule, not a constraint. *(2026-11-24: the model half is no longer
+deferred — a summarization model id exists and the decay arms filter on it, so
+selection is most-recent non-blank for the active model, as first written. See
+8.21. The writer never stores a blank row, so the exclusion is now a backstop.)*
 
 ### MessageEmbedding
 | Column | Type | Notes |
@@ -2173,7 +2253,11 @@ Each is pinned to either a milestone or a trigger condition — none is floating
   partly answered by 8.15 (D6 fixes the retrieval timeout and its fallback, D7
   fixes how a degradation is recorded and recovered), so what remains is the
   summarization and embedding-write paths in Layer D. *Trigger: near the
-  strategy-interface implementation, Weeks 7–14.*
+  strategy-interface implementation, Weeks 7–14.* **Write paths answered
+  2026-11-24 → 8.21**: queue down (logged, backfill), provider down (arq retry
+  x3, then backfill), blank summary (raised, never stored), message deleted or
+  blank before its job runs (skipped). What remains open is only whatever the
+  eval surfaces.
 - **`User.display_name`** (nullable text) — deliberately NOT added with auth:
   nothing renders a user name yet, and a nullable column is equally cheap to
   add later. `username` was considered and rejected outright — a public handle

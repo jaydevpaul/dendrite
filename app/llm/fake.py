@@ -82,9 +82,11 @@ class FakeLLMClient:
     gate: asyncio.Event | None = None
     fail_after_chunk: int | None = None
     fail_on_embed: bool = False
+    fail_on_summarize: bool = False
 
     calls: list[RecordedCall] = field(default_factory=list)
     embed_calls: list[str] = field(default_factory=list)
+    summarize_calls: list[tuple[str, int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # `is None`, not `or`: chunks=[] is a legal script - a model may return
@@ -137,3 +139,14 @@ class FakeLLMClient:
             raise FakeLLMError("scripted embedding failure")
 
         return fake_vector(text)
+
+
+    async def summarize(self,text:str,words:int):
+        self.summarize_calls.append((text,words))
+
+        if self.fail_on_summarize:
+            raise FakeLLMError("scripted summarisation failure")
+
+        return "Summary: " + " ".join(text.split()[:words])
+
+    

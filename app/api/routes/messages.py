@@ -12,7 +12,7 @@ from app.services.generation import (
     stream_generation
 )
 
-from app.core.queue import enqueue_embedding
+from app.core.queue import enqueue_message_jobs
 
 from app.api.deps import SessionDep,LLMDep, SessionFactoryDep,QueueDep
 from app.api.sse import frame
@@ -82,7 +82,7 @@ async def create(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)
         ) from exc
 
-    await enqueue_embedding(queue,message.id)
+    await enqueue_message_jobs(queue,message.id)
 
     return MessageCreated(
         message=MessageOut.model_validate(message),
@@ -164,7 +164,7 @@ async def generate(
             if isinstance(event, TextDelta):
                 yield frame("chunk",{"text": event.text})
             elif isinstance(event, GenerationDone):
-                await enqueue_embedding(queue,prepared.assistant_message_id)
+                await enqueue_message_jobs(queue,prepared.assistant_message_id)
                 yield frame(
                     "done",
                     {

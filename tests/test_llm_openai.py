@@ -9,12 +9,19 @@ fails here rather than on the first real call.
 
 import pytest
 from openai.types import CompletionUsage
-from openai.types.chat import ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice as CompletionChoice
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 from openai.types.embedding import Embedding
 
-from app.llm.base import EMBEDDING_DIMENSIONS, Completed, PromptMessage, TextDelta
+from app.llm.base import (
+    EMBEDDING_DIMENSIONS,
+    Completed,
+    PromptMessage,
+    TextDelta,
+    summary_prompt,
+)
 from app.llm.openai_client import OpenAIClient
 
 MODEL = "test-generation-model"
@@ -49,12 +56,32 @@ def usage_chunk(prompt_tokens, completion_tokens, model=MODEL):
 
 
 class StubCompletions:
-    def __init__(self, chunks):
+    def __init__(self, chunks, reply=None):
         self._chunks = chunks
+        self._reply = reply
         self.request = None
 
     async def create(self, **kwargs):
         self.request = kwargs
+
+        # The SDK returns a whole completion when the request does not stream,
+        # which is how summarize() calls it.
+        if not kwargs.get("stream"):
+            return ChatCompletion(
+                id="completion",
+                object="chat.completion",
+                created=0,
+                model=kwargs["model"],
+                choices=[
+                    CompletionChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatCompletionMessage(
+                            role="assistant", content=self._reply
+                        ),
+                    )
+                ],
+            )
 
         async def stream():
             for chunk in self._chunks:
@@ -81,8 +108,8 @@ class StubEmbeddings:
 class StubOpenAI:
     """Shaped like AsyncOpenAI as far as this client reaches into it."""
 
-    def __init__(self, chunks=(), vector=None):
-        self.completions = StubCompletions(list(chunks))
+    def __init__(self, chunks=(), vector=None, reply=None):
+        self.completions = StubCompletions(list(chunks), reply)
         self.embeddings = StubEmbeddings(
             [0.0] * EMBEDDING_DIMENSIONS if vector is None else vector
         )
@@ -92,8 +119,8 @@ class StubOpenAI:
         return self
 
 
-def build(chunks=(), vector=None, **kwargs):
-    stub = StubOpenAI(chunks=chunks, vector=vector)
+def build(chunks=(), vector=None, reply=None, **kwargs):
+    stub = StubOpenAI(chunks=chunks, vector=vector, reply=reply)
     return stub, OpenAIClient(client=stub, model=MODEL, **kwargs)
 
 
@@ -224,3 +251,61 @@ async def test_embed_rejects_a_wrong_width():
 
     with pytest.raises(ValueError, match="3072"):
         await client.embed("some text")
+
+
+# --- summarize ----------------------------------------------------------
+
+
+async def test_summarize_returns_the_reply_trimmed():
+    _, client = build(reply="  Asked how attention scales.\n")
+
+    assert await client.summarize("how does attention scale?", 25) == (
+        "Asked how attention scales."
+    )
+
+
+async def test_summarize_request_uses_its_own_model_and_effort():
+    """Summaries run on their own model id and with thinking off, not on the
+    generation settings - otherwise every summary pays for thinking."""
+    stub, client = build(
+        reply="Explained it.",
+        effort="high",
+        summarization_model="test-summary-model",
+        summarization_effort="none",
+    )
+
+    await client.summarize("the message", 40)
+
+    request = stub.completions.request
+    assert request["model"] == "test-summary-model"
+    assert request["reasoning_effort"] == "none"
+    assert not request.get("stream")
+    assert request["messages"] == [
+        {"role": "system", "content": summary_prompt(40)},
+        {"role": "user", "content": "the message"},
+    ]
+
+
+async def test_the_word_limit_reaches_the_prompt_and_the_token_cap():
+    """A longer allowance has to change both what the model is asked for and
+    how far it may run, or a long reply's summary is cut off mid-sentence."""
+    stub, client = build(reply="ok")
+
+    await client.summarize("text", 25)
+    small = stub.completions.request
+
+    await client.summarize("text", 200)
+    large = stub.completions.request
+
+    assert "at most 25 words" in small["messages"][0]["content"]
+    assert "at most 200 words" in large["messages"][0]["content"]
+    assert small["max_completion_tokens"] == 25 * 2 + 50
+    assert large["max_completion_tokens"] == 200 * 2 + 50
+
+
+async def test_summarize_with_no_content_is_an_empty_string():
+    """A refusal arrives with content None. An empty string is what the
+    summary reader already skips, so nothing downstream has to know."""
+    _, client = build(reply=None)
+
+    assert await client.summarize("anything", 25) == ""

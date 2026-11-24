@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from app.core.config import settings
 from app.context.base import (
     EMBEDDING_MISSING,
     SUMMARY_MARKER,
@@ -1210,3 +1211,58 @@ async def test_composing_twice_gives_the_same_prompt(session):
     second = await FullInheritance().compose(request)
 
     assert first.messages == second.messages
+
+
+# --- only the current summarizer's summaries are used ----------------------
+
+
+async def restamp_summaries(session, model):
+    """Mark every summary in the database as written by another model."""
+    from sqlalchemy import update
+
+    from app.models.message_summary import MessageSummary
+
+    await session.execute(update(MessageSummary).values(model_used=model))
+    await session.commit()
+
+
+async def test_decay_ignores_a_summary_from_another_model(session):
+    """If the summarizer is upgraded partway through the eval, old summaries
+    must stop being sent - otherwise a better summarizer shows up in the
+    results as better context composition."""
+    conversation, question, _ = await a_deep_branch(session)
+    await restamp_summaries(session, "some-older-model")
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert summarised_turns(context) == []
+    assert SUMMARY_MISSING in context.degradations
+
+
+async def test_decay_uses_a_summary_from_the_configured_model(session):
+    """The other half: the filter has to let the writer's own rows through."""
+    conversation, question, ancestors = await a_deep_branch(session)
+    await restamp_summaries(session, settings.summarization_model)
+
+    context = await HierarchicalDecay().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert len(summarised_turns(context)) == len(ancestors[:-3])
+    assert SUMMARY_MISSING not in context.degradations
+
+
+async def test_retrieval_ignores_a_summary_from_another_model(session):
+    """A level whose only summary is from another model is not summarized at
+    all, so it is not a candidate for promotion either."""
+    conversation, question, _ = await a_retrieval_branch(session)
+    await restamp_summaries(session, "some-older-model")
+
+    context = await HierarchicalDecayWithRetrieval().compose(
+        await a_request(session, conversation, question)
+    )
+
+    assert summarised_turns(context) == []
+    assert SUMMARY_MISSING in context.degradations

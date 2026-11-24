@@ -22,6 +22,12 @@ from tests.test_message_routes import ALICE, new_conversation, post_message, sig
 JOB = "embed_message_job"
 
 
+def queued(queue, job=JOB):
+    """The message ids queued under one job name. Every saved message also
+    queues a summary job, which this file is not about."""
+    return [message_id for name, message_id in queue.jobs if name == job]
+
+
 def generate_url(conversation_id, message_id):
     return f"/conversations/{conversation_id}/messages/{message_id}/generate"
 
@@ -46,7 +52,7 @@ async def test_a_saved_message_is_queued_for_embedding(client, queue):
 
     assert response.status_code == 201
     message_id = UUID(response.json()["message"]["id"])
-    assert queue.jobs == [(JOB, message_id)]
+    assert queued(queue) == [message_id]
 
 
 async def test_a_rejected_message_queues_nothing(client, queue):
@@ -87,7 +93,7 @@ async def test_a_finished_reply_is_queued_for_embedding(client, queue):
     frames = await sse(client, generate_url(conversation_id, question["id"]))
 
     reply_id = UUID(only(frames, "start")[0]["assistant_message_id"])
-    assert queue.jobs == [(JOB, reply_id)]
+    assert queued(queue) == [reply_id]
 
 
 async def test_a_failed_reply_is_not_queued(client, queue, llm):

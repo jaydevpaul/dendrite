@@ -5,6 +5,24 @@ from dataclasses import dataclass
 # text-embedding-3-small -> vector(1536).
 EMBEDDING_DIMENSIONS = 1536
 
+
+def summary_prompt(words: int) -> str:
+    """The instructions for summarizing one message in at most `words` words.
+
+    The summary is shown in the composed prompt as "[summarised] <this>",
+    inside the turn of whoever wrote the original, so it should describe what
+    was said rather than pretend to be the message itself.
+    """
+    return (
+        f"Summarize the chat message you are given in at most {words} words. "
+        "Describe what it said rather than repeating it, for example "
+        "'Asked how...' or 'Explained that...'. Keep names, numbers, "
+        "decisions, conclusions and any code identifiers. "
+        "Reply with the summary only."
+    )
+
+
+
 PromptRole = Literal["user","assistant"]
 
 @dataclass(frozen=True)
@@ -50,7 +68,9 @@ class LLMClient(Protocol):
             """One vector of EMBEDDING_DIMENSIONS floats."""
             ...
 
-
+        async def summarize(self,text:str,words:int)->str:
+            """A description of one message in at most `word` words"""
+            ... 
 
 
 

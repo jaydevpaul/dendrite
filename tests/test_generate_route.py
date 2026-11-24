@@ -10,6 +10,7 @@ broken markdown rather than as a transport bug.
 import json
 from uuid import UUID
 
+from app.core.config import settings
 from app.llm.fake import DEFAULT_CHUNKS
 from app.models.message_summary import MessageSummary
 from app.schemas.message import MessageOut
@@ -107,9 +108,9 @@ async def a_deep_question(client, **conversation):
 async def summarise_everything(client, session, conversation_id):
     """Give every message in the conversation a summary row.
 
-    Nothing writes summaries yet - that is a background job in a later layer -
-    so a test that needs the retrieval arm to have candidates to rank has to
-    put them there itself. Which levels actually get sent short is still the
+    The real writer runs in the background worker, which route tests do not
+    start, so a test that needs the retrieval arm to have candidates to rank
+    has to put them there itself. Which levels actually get sent short is still the
     tier's decision, not this function's.
     """
     graph = (await client.get(f"/conversations/{conversation_id}/messages")).json()
@@ -119,7 +120,7 @@ async def summarise_everything(client, session, conversation_id):
             MessageSummary(
                 message_id=UUID(message["id"]),
                 summary_text=f"a summary of {message['content']}",
-                model_used="fake-summariser",
+                model_used=settings.summarization_model,
             )
         )
 

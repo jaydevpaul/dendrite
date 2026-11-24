@@ -129,7 +129,8 @@ class HierarchicalDecay:
 
         summaries=await load_summaries(
             request.session,
-            summarised_ids(steps,fidelities)
+            summarised_ids(steps,fidelities),
+            model=settings.summarization_model
         )
 
         return render_decayed(request, fidelities,summaries,self.name)
@@ -162,7 +163,9 @@ class HierarchicalDecayWithRetrieval:
         steps = request.walk.steps
         fidelities = self.decay.assign(steps)
 
-        summaries = await load_summaries(request.session,summarised_ids(steps,fidelities))
+        summaries = await load_summaries(request.session,
+                                         summarised_ids(steps,fidelities),
+                                         model=settings.summarization_model)
 
         candidates = [
             step.message.id

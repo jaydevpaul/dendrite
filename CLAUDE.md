@@ -44,7 +44,7 @@ populated → branch, null → continuation; regeneration never deletes.
   section only when he asks where something is written down. (Applies to code
   written from 2026-09-05 on; `tests/test_llm_fake.py` predates it.)
 
-## Current state (2026-09-09)
+## Current state (2026-11-24)
 
 **Built:** models + Alembic migrations · `/health` · full auth
 (`/auth/signup|login|logout|me`, argon2 + HS256 JWT in an HttpOnly cookie) ·
@@ -93,14 +93,19 @@ and a graph over one selection, both drawn from the graph the page already has
 (`lib/navigator.ts`), and both side panels resizable against a thread floor
 (`lib/panel-size.ts`, `components/ui/resize-handle.tsx`)** · **`plainPreview`
 (`features/messages/preview.ts`), used everywhere a reply is quoted rather than
-read** · 96 frontend tests in Vitest + jsdom.
+read** · 96 frontend tests in Vitest + jsdom ·
+**the embedding write side** (2026-11-03: `app/services/embedding.py`, the arq
+worker `app/worker.py`, `app/core/queue.py`, Redis in `docker-compose.yml`,
+`python -m app.backfill_embeddings`) · **the summary write side** (2026-11-24:
+`summarize_message()`, `find_unsummarized()` and `summary_word_target()` in
+`app/services/summary.py`, `LLMClient.summarize(text, words)` on the fake and
+the real client, `summarize_message_job` in the worker,
+`python -m app.backfill_summaries`, and the decay arms' reader filter on
+`settings.summarization_model` switched on).
 
-**Not built:** summarization (the write side — nothing populates
-`message_summary` yet), the embedding write side (nothing populates
-`message_embedding` yet either), eval framework, slice 6's strategy picker. **The two write sides are the important gap:**
-`HierarchicalDecay` and retrieval both read tables nothing fills, so they
-silently degrade to plainer strategies and §7's whole comparison is
-unmeasurable until they exist.
+**Not built:** eval framework, slice 6's strategy picker. Both write sides now
+exist, so `HierarchicalDecay` and retrieval have real rows to read — the
+thesis is measurable once the eval exists.
 
 **No React component is rendered by any test.** Vitest runs the string and DOM
 maths — offsets, the source-span sweep, the thread walk — and there is no
@@ -126,27 +131,30 @@ supersedes the old "no markdown renderer, and that is load-bearing" rule and
 replaces the DOM-equals-storage equality with a verified source-offset
 mapping; and the two wire-format facts C9 turned out to need.
 
-Committed through `3273536`. **Uncommitted: all of slice 5 and branch
-delete** — `frontend/src/features/navigator/`, `lib/navigator.ts`,
-`lib/panel-size.ts`, `components/ui/resize-handle.tsx`,
-`features/messages/preview.ts` and its test, `tests/test_branch_delete.py`,
-`delete_branch()` in `app/services/message.py`, the DELETE route, and the
-changes in `app-shell.tsx`, `conversation.tsx`, `message-turn.tsx`, `api.ts`
-and `queries.ts`. **368 backend** (2 skipped, the live LLM pair) and **96
-frontend** passing.
+**§8.21 settles the derived-data write side** (2026-11-24): both jobs queued
+for every message through one function, a queue outage never failing the
+request, the summarizer as a fourth model id beside D11's three, the summary
+length as a share of the original, and a blank summary raised rather than
+stored. It closes §8.16's deferred model filter.
 
-**`design/` is untracked and undecided.** A design canvas — `Main.dc.html`,
-`Problem.dc.html`, `canvas.json`, and a 2.5MB
-`dendrite-context-strategies.html`. Nothing in the app imports it, and whether
-it belongs in the repo, in `docs/`, or in `.gitignore` has not been settled.
+Committed through `1f585e6`. **Uncommitted: the whole summary write side**
+(the files above plus `tests/test_summary_writer.py`, `test_summary_queue.py`,
+`test_summary_backfill.py` and edits to six existing test files). **441
+backend** (3 skipped, the live LLM trio) and **96 frontend** passing.
+
+**`design/` is gitignored** (`.gitignore` line 6, since `27b99d5`) — a local
+design canvas nothing in the app imports.
 
 ### Running it
 
 ```
 docker compose up -d                          # Docker Desktop must be running
 uvicorn app.main:app --reload --port 8000     # repo root, .venv active
+arq app.worker.WorkerSettings                 # background jobs; restart after adding one
 cd frontend && npm run dev                    # :5173
-pytest                                        # repo root, 368 passing
+pytest                                        # repo root, 441 passing
+python -m app.backfill_summaries --dry-run    # count what the queue missed
+python -m app.backfill_embeddings --dry-run   # same, for vectors
 ```
 
 **Run pytest as `.venv/Scripts/python.exe -m pytest`** if the venv is not
@@ -348,6 +356,23 @@ there silently re-breaks the connection.
   as not rendering a reply at all, only in miniature. It is not a parser and it
   is not reversible, so nothing anchored may be computed from its output;
   anchor offsets are always counted against the stored string.
+- **A summary written under any model id but `settings.summarization_model`
+  is invisible to the decay arms.** Both of them pass that id to
+  `load_summaries()`, so a row stamped `"fake-summariser"` or an old model is
+  silently skipped and the level goes out in full text with `summary_missing`.
+  Test helpers that insert summaries by hand must stamp the configured id
+  (`graph_builders.new_summary` defaults to it). The writer and
+  `find_unsummarized` filter on the same id, so changing it in config
+  re-summarizes everything on the next backfill — real money with the real
+  client; `--dry-run` first.
+- **Every place a message is written calls `enqueue_message_jobs()`, never one
+  job on its own.** A message with a summary and no embedding can never be
+  promoted by retrieval, and one with an embedding and no summary is never a
+  candidate. A new write path that queues only one of the two fails silently.
+- **A blank summary from the model raises `EmptySummary`; it is never
+  stored.** A stored blank row would be skipped by the reader yet make the
+  message look done, so nothing would ever retry it. The worker turns the
+  raise into an arq `Retry`, and the backfill counts it as failed.
 - Do not pipe a backgrounded dev server through `tail` — it buffers and the log
   stays empty.
 - Anything rendered on the frontend's fixed-dark brand panel needs a
@@ -446,25 +471,25 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**The summarization and embedding write side.** Layer C is finished, frontend
-slice 4 has shipped, and this is now the gap that matters: nothing populates
-`message_summary` or `message_embedding`, so `HierarchicalDecay` and
-`HierarchicalDecayWithRetrieval` both read tables that are always empty. They
-degrade quietly to plainer strategies, which means §7 would compare five arms
-where two of them are not doing the thing they exist to test. **The project's
-own thesis is unmeasurable until this exists.**
+**Close out the write side, then slice 6's strategy picker.**
 
-What it needs, from §8.5 and §8.6: summarization is **async and lightweight** —
-written after a message lands, not on the read path — and composition must
-still work when a summary is missing, which it already does. The embedding side
-writes `vector(1536)` from `text-embedding-3-small` and is the same shape of
-job: one row per message, written off the request. Both now have a real client
-to call, so the only new decisions are *when* the work is queued and what
-happens to a message whose summary never lands.
+1. **Commit the summary write side**, together with the decision record's new
+   §8.21 and the dated notes it added to §8.16, §9 and §12.
+2. **Fill the dev database** — `python -m app.backfill_summaries` (100
+   messages unsummarized on 2026-11-24) and the embeddings equivalent. With
+   `DENDRITE_LLM_CLIENT=fake` the rows are placeholder text, which is fine for
+   the UI and useless for anything measured.
+3. **Slice 6, the strategy picker** — shows the composed context and the token
+   cost beside each arm, not the per-branch menu slice 4 already added. **It
+   needs a backend capability first** (a compose-without-generating read), and
+   no frontend slice starts before the backend it renders exists.
 
-Read §8.5, §8.6 and §9's `message_summary` / `message_embedding` rows before
-starting, and note that `load_summaries()` and the retrieval query already
-exist and define what the writers have to produce.
+**The eval is last, and it is the only piece that costs real money**: ~$2.60 a
+run against a $20 budget. Before its harness is built, the open item on how
+the tunable arms get their hyperparameters (a tuning/reporting split of the
+scenarios) has to be settled — it decides how fixtures are split and cannot be
+retrofitted. The summary allowance (`summary_ratio`, `summary_min_words`,
+`summary_max_words`) is now one more knob for that sweep.
 
 The nine Layer C sittings, all done:
 
@@ -480,12 +505,6 @@ The nine Layer C sittings, all done:
 | C8 | SSE route, the four events, `MessageOut.pending` | **done** |
 | C9 | The one concrete OpenAI client, against the real API | **done** |
 
-**After the write side:** slice 6's strategy picker, which shows the composed
-context and the token cost beside each arm — not the per-branch menu slice 4
-already added. Slice 5's navigator has shipped. **The eval is last, and it is
-the only piece that costs real money**: ~$2.60 a run against a $20 budget, so
-it runs when there is something worth measuring.
-
 ## Progress log
 
 Full history is in **`docs/PROGRESS.md`** — this section carries only the most
@@ -494,40 +513,21 @@ below. If a fact will still matter in three months (a port, a run command, a
 standing gotcha, a working rule), promote it into **Current state** above
 instead of leaving it buried in a dated entry.
 
-- **2026-09-09**: **Frontend slice 5 — the branch navigator — and branch
-  delete.** 368 backend tests (2 skipped, the live LLM pair) and 96 frontend, up
-  from 354 and 68. All of it uncommitted. Written up from the working tree
-  rather than a transcript, since the work was done in a separate chat — full
-  detail in `docs/PROGRESS.md`, durable rules promoted into **Standing
-  gotchas** above.
-  **The navigator is `frontend/src/features/navigator/`** — a tree view and a
-  graph view over one selection, both drawn from the graph the page already has,
-  so switching is a render and refetches nothing. **A turn fuses a question with
-  its reply into one node and splits the moment a question has more than one
-  reply**, which is regeneration and the eval's fan-out — the cases
-  message-as-node exists to represent. Fusion is a rendering choice only; the
-  message is still the stored unit and still what an anchor points into.
-  **Layout is deterministic and there is no graph library**: every node has one
-  parent, so depth sets the row and a sweep sets the lane, and two screenshots
-  of the same conversation are identical. Sibling order matches the linear
-  walk's newest-first-with-an-id-tiebreak, so the two views cannot disagree.
-  **Selecting is separate from going there** — a click selects, the footer, a
-  double-click and Enter open the path.
-  **Both side panels are now resizable**, and the two preferences are stored
-  differently on purpose: **width per browser** (a width is a fact about the
-  window it was dragged in), **open state per user** (a habit, and two people
-  sharing a browser should not inherit each other's). Every width is clamped
-  against the viewport with a 420px thread floor.
-  **Branch delete** is `DELETE /conversations/{id}/messages/{message_id}`, and
-  only a branch: the root is 422 because that is the conversation's own route,
-  a continuation is 422 because it would take the rest of the thread. The
-  subtree is collected by a recursive CTE and the messages deleted explicitly —
-  the cascade reasoning is now a standing gotcha. The client invalidates rather
-  than patches, because working out locally which rows went would re-implement
-  the server's walk where it can drift.
-  **`plainPreview()`** strips markdown wherever a reply is quoted rather than
-  read. Not a parser, and never used for anything anchored.
-  **`design/` is untracked and undecided** — a design canvas including a 2.5MB
-  HTML file that nothing imports.
-  **Next: the summarization and embedding write side**, unchanged and now the
-  only thing between here and a measurable thesis.
+- **2026-11-24**: **The summary write side**, completing what the embedding
+  write side (`1f585e6`, 2026-11-03, not logged at the time) started. 441
+  backend tests (3 skipped, the live LLM trio), up from 368. All uncommitted.
+  Built in four steps: the seam (`summarize(text, words)` on `LLMClient`, the
+  fake and the OpenAI client; `summary_prompt(words)` in `app/llm/base.py`;
+  five config keys), the writer (`summarize_message`, `find_unsummarized`,
+  `summary_word_target` in `app/services/summary.py`), the worker job plus
+  `enqueue_message_jobs()` replacing `enqueue_embedding()` on both write
+  paths, and `python -m app.backfill_summaries`.
+  **Decided:** summaries run on `gpt-5.6-luna` at effort `none` via a new
+  `summarization_model` key; the decay arms now pass it to
+  `load_summaries()`. **A summary's length is a share of the original** — 15%
+  of its words, held between 25 and 200 — because a fixed one-to-three
+  sentences crushed long replies and padded one-line questions; the three
+  numbers are config, for the eval to tune. Every message is summarized, short
+  ones included, so `summary_missing` keeps meaning "the job is behind". A
+  blank answer raises instead of being stored. Durable rules promoted into
+  **Standing gotchas**. **Next: commit, backfill the dev DB, then slice 6.**

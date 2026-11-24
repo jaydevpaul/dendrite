@@ -7,17 +7,15 @@ from arq import ArqRedis
 
 logger = logging.getLogger(__name__)
 
-async def enqueue_embedding(queue: ArqRedis, message_id: UUID):
-    """Ask the worker to embed this message. Never raises.
-
-    By the time this runs the message is already saved, and a missing
-    embedding only makes retrieval a little weaker. So if Redis is down the
-    request still succeeds; the failure is logged and the backfill command
-    picks the message up later.
-    """
+async def _enqueue(queue: ArqRedis,job:str, message_id: UUID):
     try:
-        await queue.enqueue_job('embed_message_job',message_id)
+        await queue.enqueue_job(job,message_id)
     except Exception:
-        logger.exception("could not queue embedding for message %s",message_id)
+        logger.exception("could not queue %s for message %s",job,message_id)
 
-        
+async def enqueue_message_jobs(queue:ArqRedis, message_id:UUID):
+    """Ask the worker to embed and summarize this message."""
+
+    await _enqueue(queue,"embed_message_job",message_id)
+    await _enqueue(queue,"summarize_message_job",message_id)
+

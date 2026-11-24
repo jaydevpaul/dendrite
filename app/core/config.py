@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     judge_model: str = "gpt-5.6-terra"          # section 7's judge
     embedding_model: str = "text-embedding-3-small"
 
+    
+    summarization_model: str = "gpt-5.6-luna"
+    summarization_effort: Literal["none", "low", "medium", "high", "max"] = "none"
+
+    # How long a summary may be: a share of the original's words, kept between
+    # a floor and a ceiling. A fixed length would crush a long reply and pad a
+    # one-line question. These are tuning knobs for the eval, not fixed facts.
+    summary_ratio: float = 0.15
+    summary_min_words: int = 25
+    summary_max_words: int = 200
+
+
     # D6's retrieval embed is the only network call inside compose, so it is
     # where 8.6's timeout and fallback to HierarchicalDecay live. Chosen, not
     # specified: 8.6 fixes the 1-2s whole-compose budget, not this slice of it.

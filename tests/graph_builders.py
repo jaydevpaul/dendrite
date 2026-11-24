@@ -87,7 +87,7 @@ async def new_summary(
     session,
     message,
     summary_text="a shorter version of it",
-    model_used="fake-summariser",
+    model_used=settings.summarization_model,
     created_at=None,
 ):
     """A derived summary hanging off a message.

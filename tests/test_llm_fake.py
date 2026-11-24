@@ -288,3 +288,51 @@ async def test_embed_returns_exactly_what_fake_vector_builds():
     text = "ef_search trades recall for latency"
 
     assert await FakeLLMClient().embed(text) == fake_vector(text)
+
+
+# --- summarize ------------------------------------------------------------
+
+
+async def test_summarize_records_the_text_and_the_word_limit():
+    client = FakeLLMClient()
+    text = "one two three four five six seven eight nine ten"
+
+    summary = await client.summarize(text, 4)
+
+    assert client.summarize_calls == [(text, 4)]
+    assert summary == "Summary: one two three four"
+
+
+async def test_summarize_keeps_to_the_word_limit_it_was_given():
+    """The writer's tests check that a long message gets a longer summary than
+    a short one. That is only visible if the fake obeys the limit."""
+    text = " ".join(f"w{i}" for i in range(100))
+
+    short = await FakeLLMClient().summarize(text, 5)
+    long = await FakeLLMClient().summarize(text, 30)
+
+    assert len(short.split()) == 1 + 5      # the "Summary:" marker plus 5
+    assert len(long.split()) == 1 + 30
+
+
+async def test_summarize_is_deterministic():
+    """The writer's tests compare a stored row against what the fake returns,
+    which only works if the same text always gives the same summary."""
+    text = "pgvector is enough for your scale"
+
+    assert await FakeLLMClient().summarize(text, 25) == await FakeLLMClient().summarize(
+        text, 25
+    )
+
+
+async def test_summarize_can_fail_without_touching_generate_or_embed():
+    """A summarizer outage must not take generation or embedding down with it,
+    or the fallback to full text would never be exercised on its own."""
+    client = FakeLLMClient(fail_on_summarize=True)
+
+    with pytest.raises(FakeLLMError):
+        await client.summarize("anything", 25)
+
+    assert isinstance((await drain(client))[-1], Completed)
+    assert len(await client.embed("still works")) == EMBEDDING_DIMENSIONS
+    assert client.summarize_calls == [("anything", 25)]

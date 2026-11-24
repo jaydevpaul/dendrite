@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.llm.base import EMBEDDING_DIMENSIONS,Completed, PromptMessage, TextDelta
+from app.llm.base import EMBEDDING_DIMENSIONS,Completed, PromptMessage, TextDelta, summary_prompt
 
 __all__=["OpenAIClient"]
 
@@ -22,7 +22,9 @@ class OpenAIClient:
             client: AsyncOpenAI | None = None,
             model: str | None =  None,
             effort: str | None = None,
-            embedding_model: str | None = None
+            embedding_model: str | None = None,
+            summarization_model: str | None=None,
+            summarization_effort: str | None = None
     ):
         self._client = client or AsyncOpenAI(
             api_key = settings.llm_api_key,
@@ -32,6 +34,10 @@ class OpenAIClient:
         self._model = model or settings.generation_model
         self._effort=effort or settings.generation_effort
         self._embedding_model = embedding_model or settings.embedding_model
+        self._summarization_model=summarization_model or settings.summarization_model
+        self._summarization_effort=summarization_effort or settings.summarization_effort
+
+
 
     async def generate(self, system: str, messages: Sequence[PromptMessage]):
         stream = await self._client.chat.completions.create(
@@ -88,7 +94,18 @@ class OpenAIClient:
         return vector
     
 
+    async def summarize(self,text:str,words:int):
+
+        response = await self._client.chat.completions.create(
+            model=self._summarization_model,
+            reasoning_effort=self._summarization_effort,
+            messages = [
+                {"role":"system", "content":summary_prompt(words)},
+                {"role":"user", "content":text},
+            ],
+            max_completion_tokens=words * 2 + 50
+        )
 
 
-
+        return (response.choices[0].message.content or "").strip()
 

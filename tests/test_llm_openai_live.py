@@ -5,8 +5,8 @@ the key to .env does not quietly make every pytest run bill you:
 
     DENDRITE_LIVE_LLM=1 .venv/Scripts/python.exe -m pytest tests/test_llm_openai_live.py -q
 
-Two calls, both deliberately tiny - a one-word reply and a three-word
-embedding. Everything else about this client is covered offline against a
+Three calls, all deliberately tiny - a one-word reply, a three-word
+embedding and a two-sentence summary. Everything else is covered offline against a
 stub; what only the real API can tell us is whether the wire format is what we
 think it is, and whether the model ids in config exist on this account.
 """
@@ -68,3 +68,16 @@ async def test_embed_returns_the_locked_width(live_client):
 
     assert len(vector) == EMBEDDING_DIMENSIONS
     assert any(vector), "an all-zero vector means the response was not read"
+
+
+async def test_summarize_accepts_the_configured_model_and_effort(live_client):
+    """The offline stub accepts any request. Only the real API can say whether
+    this model takes effort "none" alongside a completion-token cap."""
+    summary = await live_client.summarize(
+        "Use pgvector inside Postgres rather than a separate vector database; "
+        "at a few hundred thousand rows the HNSW index is fast enough.",
+        25,
+    )
+
+    assert summary, "the model returned an empty summary"
+    print(f"\nsummary={summary!r}")

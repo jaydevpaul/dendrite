@@ -1971,3 +1971,84 @@ and is now the only thing between here and a measurable thesis: nothing
 populates `message_summary` or `message_embedding`, so two of the five arms
 read tables that are always empty and degrade quietly to plainer strategies.
 After that, slice 6's strategy picker, then the eval.
+
+- **2026-11-03 (backfilled 2026-11-24)**: **The embedding write side**, commit
+  `1f585e6`. Not logged at the time; reconstructed from the commit. Every saved
+  message and every finished reply is queued for embedding through arq on
+  Redis (a `redis` service added to `docker-compose.yml`, `redis_url` in
+  config). `embed_message()` and `find_unembedded()` in
+  `app/services/embedding.py`; the worker in `app/worker.py` retries an
+  embedder failure up to three times with a growing delay;
+  `python -m app.backfill_embeddings [--dry-run]` fills whatever the queue
+  missed. A Redis outage never fails the request - the enqueue logs and moves
+  on, and the backfill catches up.
+
+- **2026-11-24**: **The summary write side.** 441 backend tests (3 skipped,
+  the live LLM trio), up from 368. Uncommitted at session end.
+
+### The seam
+
+`LLMClient` gained `summarize(text, words) -> str`. The word allowance is an
+argument so the client stays wire-only and the policy lives in the service.
+`summary_prompt(words)` in `app/llm/base.py` is a function, not a constant,
+because the number is written into the text and a template variable can be
+used unfilled without anything raising. The real client calls chat
+completions without streaming, at `summarization_model` /
+`summarization_effort` (`gpt-5.6-luna`, `none`), capped at
+`max_completion_tokens = words * 2 + 50`, and turns a `None` reply into `""`.
+The fake returns `"Summary: "` plus the first `words` words, so a test can see
+the allowance it was given; `fail_on_summarize` scripts an outage. One live
+test added behind `DENDRITE_LIVE_LLM=1`.
+
+### The allowance
+
+First drafted as a fixed "one to three sentences". Changed on the user's
+challenge: a 2,000-word reply squeezed to two sentences loses facts the decay
+arm then lacks, which would show up in the eval as decay being worse rather
+than as the summary being too short - and a three-sentence summary of a
+one-line question is longer than the question. `summary_word_target()` is now
+15% of the original's words, held between 25 and 200 (`summary_ratio`,
+`summary_min_words`, `summary_max_words`), and the three are tuning knobs.
+
+### The writer
+
+`summarize_message()` mirrors `embed_message()`: skip a deleted or blank
+message, skip one that already has a usable summary from the current model
+(a blank row does not count), call the model, store, commit. **A blank answer
+raises `EmptySummary` rather than being stored** - a stored blank would make
+the message look done to `find_unsummarized` while the reader skipped it, so
+nothing would ever retry. **Every message is summarized, short ones
+included**, so `summary_missing` keeps meaning "the job is behind" rather than
+"this message was too short to bother with".
+
+### Queue, worker, reader
+
+`enqueue_message_jobs()` replaces `enqueue_embedding()` and queues both jobs
+for every message, each in its own try, from both write paths.
+`summarize_message_job` mirrors the embedding job and turns any failure,
+including `EmptySummary`, into an arq `Retry`. Both decay arms now pass
+`model=settings.summarization_model` to `load_summaries()` - the trigger
+section 8.16 left for the deferred model filter. Test helpers that hand-insert
+summaries were moved to the configured id, or the filter hides them.
+
+### Backfill
+
+`python -m app.backfill_summaries [--dry-run]`, the embedding backfill with the
+summary functions swapped in; it reuses `BackfillReport`. Kept as a second
+file rather than generalized, so the embedding one stayed untouched. The dev
+database had 100 unsummarized messages on the dry run.
+
+### Slips caught by the tests
+
+Two unannotated dataclass fields in the fake plus a misspelled
+`fail_on_sumarize` (the standing missing-annotation trap again), `summarise`
+vs `summarize` on the real client, and `summarize_messages` vs
+`summarize_message` on the writer. All fixed in place. Working preference
+recorded: slips in hand-typed backend code are fixed directly rather than
+handed back; new code is still presented to type.
+
+### Next
+
+Commit; backfill the dev database; then slice 6's strategy picker, which
+needs a compose-without-generating backend read before its frontend starts.
+
