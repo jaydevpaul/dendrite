@@ -469,13 +469,10 @@ there silently re-breaks the connection.
 - `docs/PROGRESS.md` — full session history. Read on demand.
 
 ## Next task
-**Close out the write side, then slice 6's strategy picker.**
+**Slice 6's strategy picker.** The dev database is fully summarized and
+embedded (both backfills report 0 missing, run with the real client).
 
-1. **Fill the dev database** — `python -m app.backfill_summaries` (100
-   messages unsummarized on 2026-11-24) and the embeddings equivalent. With
-   `DENDRITE_LLM_CLIENT=fake` the rows are placeholder text, which is fine for
-   the UI and useless for anything measured.
-2. **Slice 6, the strategy picker** — shows the composed context and the token
+1. **Slice 6, the strategy picker** — shows the composed context and the token
    cost beside each arm, not the per-branch menu slice 4 already added. **It
    needs a backend capability first** (a compose-without-generating read), and
    no frontend slice starts before the backend it renders exists.
@@ -527,4 +524,4 @@ instead of leaving it buried in a dated entry.
   numbers are config, for the eval to tune. Every message is summarized, short
   ones included, so `summary_missing` keeps meaning "the job is behind". A
   blank answer raises instead of being stored. Durable rules promoted into
-  **Standing gotchas**. **Next: commit, backfill the dev DB, then slice 6.**
+  **Standing gotchas**. **Next: slice 6.**
